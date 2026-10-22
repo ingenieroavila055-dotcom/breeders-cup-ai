@@ -1,0 +1,261 @@
+"""Cliente de Supabase y funciones CRUD para races, horses y simulation_results."""
+
+from __future__ import annotations
+
+import math
+import os
+import uuid
+from functools import lru_cache
+from typing import Any, Iterable
+
+import numpy as np
+import pandas as pd
+from dotenv import load_dotenv
+from supabase import Client, create_client
+
+from services.simulator import ADJUSTMENT_COLUMNS, parse_morning_line
+
+load_dotenv()
+
+RACES_TABLE = "races"
+HORSES_TABLE = "horses"
+RESULTS_TABLE = "simulation_results"
+
+# Listas blancas: solo estas columnas se envian a la base de datos.
+RACE_COLUMNS = (
+    "race_name",
+    "race_number",
+    "track",
+    "race_date",
+    "surface",
+    "distance",
+    "track_condition",
+    "source_filename",
+)
+HORSE_COLUMNS = (
+    "program_number",
+    "name",
+    "morning_line",
+    "base_speed_figure",
+    "foreign_origin",
+    "foreign_level",
+    "dirt_debut",
+    "form_trend",
+    "class_rating",
+    "jockey",
+    "is_regular_jockey",
+    "jockey_switch",
+    "track_aptitude",
+    "mud_proven",
+    "running_style",
+    "weight_lbs",
+    "last_weight_lbs",
+    "scratched",
+)
+
+
+class DatabaseError(RuntimeError):
+    """Error controlado de acceso a Supabase."""
+
+
+# ---------------------------------------------------------------------------
+# Conexion
+# ---------------------------------------------------------------------------
+def is_configured() -> bool:
+    return bool(os.getenv("SUPABASE_URL", "").strip() and os.getenv("SUPABASE_KEY", "").strip())
+
+
+@lru_cache(maxsize=1)
+def get_client() -> Client:
+    url = os.getenv("SUPABASE_URL", "").strip()
+    key = os.getenv("SUPABASE_KEY", "").strip()
+    if not url or not key:
+        raise DatabaseError("Faltan SUPABASE_URL o SUPABASE_KEY en el archivo .env.")
+    try:
+        return create_client(url, key)
+    except Exception as exc:  # noqa: BLE001 - la libreria lanza varios tipos de error
+        raise DatabaseError(f"No se pudo crear el cliente de Supabase: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Utilidades
+# ---------------------------------------------------------------------------
+def _clean(value: Any) -> Any:
+    """Convierte tipos numpy/pandas y NaN a valores JSON validos."""
+    if value is None:
+        return None
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        number = float(value)
+        return None if math.isnan(number) or math.isinf(number) else number
+    if isinstance(value, (pd.Timestamp,)):
+        return value.date().isoformat()
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
+def _pick(source: dict[str, Any], columns: Iterable[str]) -> dict[str, Any]:
+    return {column: _clean(source.get(column)) for column in columns}
+
+
+def _execute(builder: Any, action: str) -> list[dict[str, Any]]:
+    try:
+        response = builder.execute()
+    except Exception as exc:  # noqa: BLE001
+        raise DatabaseError(f"Supabase fallo al {action}: {exc}") from exc
+    return list(response.data or [])
+
+
+# ---------------------------------------------------------------------------
+# Escritura
+# ---------------------------------------------------------------------------
+def save_race(race: dict[str, Any]) -> str:
+    """Inserta una carrera y devuelve su id (uuid)."""
+    row = _pick(race, RACE_COLUMNS)
+    if not row.get("race_name"):
+        raise DatabaseError("La carrera necesita 'race_name'.")
+    if not row.get("surface"):
+        raise DatabaseError("La carrera necesita 'surface'.")
+    row["id"] = str(uuid.uuid4())
+    if not row.get("track"):
+        row["track"] = "Keeneland"
+    if not row.get("track_condition"):
+        row["track_condition"] = "Fast"
+    _execute(get_client().table(RACES_TABLE).insert(row), "guardar la carrera")
+    return row["id"]
+
+
+def save_horses(race_id: str, horses: list[dict[str, Any]]) -> list[str]:
+    """Inserta los caballos de una carrera. Devuelve los ids en el mismo orden."""
+    if not horses:
+        return []
+    rows: list[dict[str, Any]] = []
+    for horse in horses:
+        row = _pick(horse, HORSE_COLUMNS)
+        if not row.get("name"):
+            raise DatabaseError("Todos los caballos necesitan 'name'.")
+        row["program_number"] = row.get("program_number") or "?"
+        row["id"] = str(uuid.uuid4())
+        row["race_id"] = race_id
+        row["morning_line_decimal"] = parse_morning_line(horse.get("morning_line"))
+        rows.append(row)
+    _execute(get_client().table(HORSES_TABLE).insert(rows), "guardar los caballos")
+    return [row["id"] for row in rows]
+
+
+def save_simulation_results(
+    race_id: str,
+    horse_ids: list[str],
+    results: pd.DataFrame,
+    iterations: int,
+    sigma: float,
+) -> str:
+    """Guarda el resultado de una simulacion. `horse_ids` sigue el orden de la lista
+    original de caballos (la columna `horse_key` del DataFrame de resultados).
+    Devuelve el run_id que agrupa todas las filas.
+    """
+    if results.empty:
+        raise DatabaseError("No hay resultados para guardar.")
+    run_id = str(uuid.uuid4())
+    rows: list[dict[str, Any]] = []
+    for record in results.to_dict("records"):
+        key = int(record["horse_key"])
+        if key >= len(horse_ids):
+            raise DatabaseError("Los resultados no coinciden con los caballos guardados.")
+        rows.append(
+            {
+                "id": str(uuid.uuid4()),
+                "run_id": run_id,
+                "race_id": race_id,
+                "horse_id": horse_ids[key],
+                "final_adjusted_rating": _clean(record["final_adjusted_rating"]),
+                "adjustments": {column: _clean(record.get(column)) or 0.0 for column in ADJUSTMENT_COLUMNS},
+                "win_probability": _clean(record["win_probability"]),
+                "implied_probability": _clean(record.get("implied_probability")),
+                "decimal_odds": _clean(record.get("decimal_odds")),
+                "expected_value": _clean(record.get("expected_value")),
+                "is_positive_ev": bool(record.get("is_positive_ev", False)),
+                "iterations": int(iterations),
+                "sigma": float(sigma),
+            }
+        )
+    _execute(get_client().table(RESULTS_TABLE).insert(rows), "guardar los resultados")
+    return run_id
+
+
+def save_full_analysis(
+    race: dict[str, Any],
+    horses: list[dict[str, Any]],
+    results: pd.DataFrame,
+    iterations: int,
+    sigma: float,
+) -> str:
+    """Guarda carrera + caballos + resultados. Si algo falla, elimina lo ya insertado
+    (el borrado en cascada limpia las tablas hijas). Devuelve el race_id.
+    """
+    race_id = save_race(race)
+    try:
+        horse_ids = save_horses(race_id, horses)
+        save_simulation_results(race_id, horse_ids, results, iterations, sigma)
+    except DatabaseError:
+        try:
+            delete_race(race_id)
+        except DatabaseError:
+            pass
+        raise
+    return race_id
+
+
+# ---------------------------------------------------------------------------
+# Lectura y borrado
+# ---------------------------------------------------------------------------
+def list_races(limit: int = 50) -> list[dict[str, Any]]:
+    builder = (
+        get_client()
+        .table(RACES_TABLE)
+        .select("*")
+        .order("created_at", desc=True)
+        .limit(max(1, min(int(limit), 200)))
+    )
+    return _execute(builder, "listar carreras")
+
+
+def get_horses(race_id: str) -> list[dict[str, Any]]:
+    builder = get_client().table(HORSES_TABLE).select("*").eq("race_id", race_id).order("created_at")
+    return _execute(builder, "leer los caballos")
+
+
+def get_latest_results(race_id: str) -> list[dict[str, Any]]:
+    """Resultados de la simulacion mas reciente de una carrera."""
+    client = get_client()
+    latest = _execute(
+        client.table(RESULTS_TABLE)
+        .select("run_id")
+        .eq("race_id", race_id)
+        .order("created_at", desc=True)
+        .limit(1),
+        "leer la ultima simulacion",
+    )
+    if not latest:
+        return []
+    builder = (
+        client.table(RESULTS_TABLE)
+        .select("*")
+        .eq("run_id", latest[0]["run_id"])
+        .order("win_probability", desc=True)
+    )
+    return _execute(builder, "leer los resultados")
+
+
+def delete_race(race_id: str) -> None:
+    """Elimina una carrera; sus caballos y resultados se borran en cascada."""
+    _execute(get_client().table(RACES_TABLE).delete().eq("id", race_id), "eliminar la carrera")
