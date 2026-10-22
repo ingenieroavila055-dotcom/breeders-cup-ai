@@ -37,7 +37,7 @@ MAX_IMAGES = 30  # imagenes por extraccion (limite practico para controlar el co
 MAX_IMAGE_BYTES = 4_500_000  # la API acepta hasta 5 MB por imagen
 MAX_IMAGE_SIDE = 3000  # lado mayor maximo en pixeles antes de reducir
 MAX_REQUEST_BYTES = 24 * 1024 * 1024  # el limite de 32 MB de la API cuenta el Base64 (+33 %)
-MAX_OUTPUT_TOKENS = 12_000
+MAX_OUTPUT_TOKENS = 20_000  # un JSON de carrera usa ~3,000; margen amplio (la API exige streaming por encima de ~21,000)
 MAX_ATTEMPTS = 2
 
 
@@ -48,7 +48,8 @@ class ExtractionError(RuntimeError):
 SYSTEM_PROMPT = f"""Eres un analista experto en handicapping de carreras de caballos de pura sangre \
 (Breeders' Cup, Keeneland, Del Mar) y lees Past Performances de Daily Racing Form y Brisnet, \
 ya sea en PDF o en fotos y capturas de pantalla.
-Tu unica salida es UN objeto JSON valido. Sin texto antes o despues, sin markdown, sin comentarios.
+Tu unica salida es UN objeto JSON valido. Sin texto antes o despues, sin markdown, sin comentarios. \
+Devuelvelo minificado: sin saltos de linea ni indentacion y sin repetir informacion.
 Nunca inventes datos: si algo no aparece en el PDF y no puede deducirse, usa null (o el valor por \
 defecto indicado). Los nombres de claves y los valores de catalogo deben coincidir EXACTAMENTE.
 
@@ -393,23 +394,40 @@ def extract_race_data_from_files(
     client = anthropic.Anthropic(api_key=api_key)
     last_error: Exception | None = None
 
+    thinking_off = True  # evita que el razonamiento interno consuma el limite de tokens de salida
     for attempt in range(1, MAX_ATTEMPTS + 1):
         user_text = prompt
         if attempt > 1:
-            user_text += "\nIMPORTANTE: tu respuesta anterior no fue un JSON valido. Devuelve SOLO JSON valido."
-        try:
-            response = client.messages.create(
-                model=model,
-                max_tokens=MAX_OUTPUT_TOKENS,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": content + [{"type": "text", "text": user_text}]}],
+            user_text += (
+                "\nIMPORTANTE: tu respuesta anterior no fue un JSON valido o se corto por ser demasiado larga. "
+                "Devuelve SOLO el JSON minificado, en una sola linea, con un unico objeto por caballo "
+                "y sin ningun texto adicional."
             )
+        request = {
+            "model": model,
+            "max_tokens": MAX_OUTPUT_TOKENS,
+            "system": SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": content + [{"type": "text", "text": user_text}]}],
+        }
+        try:
+            if thinking_off:
+                try:
+                    response = client.messages.create(thinking={"type": "disabled"}, **request)
+                except anthropic.BadRequestError as exc:
+                    if "thinking" not in str(exc).lower():
+                        raise
+                    thinking_off = False  # el modelo no admite el parametro: se envia sin el
+                    response = client.messages.create(**request)
+            else:
+                response = client.messages.create(**request)
         except anthropic.APIError as exc:
             raise ExtractionError(f"Error de la API de Anthropic: {exc}") from exc
 
         text = "".join(block.text for block in response.content if getattr(block, "type", "") == "text")
         if response.stop_reason == "max_tokens":
-            last_error = ValueError("La respuesta se corto por limite de tokens (demasiados caballos).")
+            last_error = ValueError(
+                "La respuesta se corto por limite de tokens. Indica solo las paginas de la carrera o usa fotos mas claras."
+            )
             continue
         try:
             return _normalize_result(_parse_json(text))
