@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import io
 import os
+import uuid
+from collections import OrderedDict
 from datetime import date
 from html import escape
 
@@ -587,6 +589,49 @@ api_ok = bool(os.getenv("ANTHROPIC_API_KEY", "").strip())
 db_ok = db.is_configured()
 track = TRACK_NAME
 
+# ---------------------------------------------------------------------------
+# Recuperacion de sesion: si el navegador (p. ej. el celular) recarga la pagina,
+# el trabajo se restaura desde la memoria del servidor usando el parametro ?s=
+# de la URL. Si la aplicacion se reinicia en el servidor, la memoria se pierde.
+# ---------------------------------------------------------------------------
+SESSION_STORE_MAX = 40
+PERSISTED_PREFIXES = ("w_", "name_", "distance_", "surface_", "cond_")
+PERSISTED_KEYS = ("horses_df", "editor_version", "results", "source_filename", "saved_race_id")
+
+
+@st.cache_resource
+def _session_store() -> OrderedDict:
+    return OrderedDict()
+
+
+session_token = st.query_params.get("s")
+if not session_token:
+    session_token = uuid.uuid4().hex[:12]
+    st.query_params["s"] = session_token
+
+if not st.session_state.get("_session_restored"):
+    st.session_state["_session_restored"] = True
+    snapshot = _session_store().get(session_token)
+    if snapshot:
+        for state_key, state_value in snapshot.items():
+            st.session_state[state_key] = state_value
+
+
+def persist_session(current_df) -> None:
+    snapshot = {
+        key: value
+        for key, value in st.session_state.items()
+        if key in PERSISTED_KEYS or (isinstance(key, str) and key.startswith(PERSISTED_PREFIXES))
+    }
+    if current_df is not None:
+        snapshot["horses_df"] = current_df.reset_index(drop=True).copy()
+    store = _session_store()
+    store[session_token] = snapshot
+    store.move_to_end(session_token)
+    while len(store) > SESSION_STORE_MAX:
+        store.popitem(last=False)
+
+
 st.markdown(brand_bar_html(track), unsafe_allow_html=True)
 context_slot = st.empty()
 
@@ -597,22 +642,28 @@ step_header("01", "Configuración de la carrera", "Carrera oficial, superficie y
 with st.expander("Datos de la carrera", expanded=True):
     col_a, col_b = st.columns(2)
     with col_a:
-        race_label = st.selectbox("Carrera oficial", [r["label"] for r in BREEDERS_CUP_RACES], index=13)
+        race_labels = [r["label"] for r in BREEDERS_CUP_RACES]
+        st.session_state.setdefault("w_race", race_labels[13])
+        race_label = st.selectbox("Carrera oficial", race_labels, key="w_race")
         race_def = next(r for r in BREEDERS_CUP_RACES if r["label"] == race_label)
-        race_name = st.text_input("Nombre de la carrera", value=race_def["name"], key=f"name_{race_label}").strip()
-        race_number = st.number_input("Numero de carrera (0 = sin numero)", min_value=0, max_value=20, value=0, step=1)
-    with col_b:
-        surface = st.selectbox(
-            "Superficie", list(sim.SURFACES), key=f"surface_{race_label}",
-            index=list(sim.SURFACES).index(race_def["surface"]),
+        st.session_state.setdefault(f"name_{race_label}", race_def["name"])
+        race_name = st.text_input("Nombre de la carrera", key=f"name_{race_label}").strip()
+        st.session_state.setdefault("w_number", 0)
+        race_number = st.number_input(
+            "Numero de carrera (0 = sin numero)", min_value=0, max_value=20, step=1, key="w_number"
         )
-        distance = st.text_input("Distancia", value=race_def["distance"], key=f"distance_{race_label}").strip()
-        race_date = st.date_input("Fecha", value=date.today())
+    with col_b:
+        st.session_state.setdefault(f"surface_{race_label}", race_def["surface"])
+        surface = st.selectbox("Superficie", list(sim.SURFACES), key=f"surface_{race_label}")
+        st.session_state.setdefault(f"distance_{race_label}", race_def["distance"])
+        distance = st.text_input("Distancia", key=f"distance_{race_label}").strip()
+        st.session_state.setdefault("w_date", date.today())
+        race_date = st.date_input("Fecha", key="w_date")
 
+    st.session_state.setdefault(f"cond_{surface}", "Firm" if surface == "Turf" else "Fast")
     track_condition = st.selectbox(
         "Condicion de pista",
         list(sim.TRACK_CONDITIONS),
-        index=1 if surface == "Turf" else 0,
         key=f"cond_{surface}",
         help="Fast/Firm = rapida. Yielding/Soft/Muddy/Sloppy/Heavy = suave/humeda (activa el bonus de +2.5).",
     )
@@ -620,14 +671,15 @@ with st.expander("Datos de la carrera", expanded=True):
         st.warning("Pista suave/humeda: bonus a europeos en grama y a caballos probados en fango.")
 
 with st.expander("Ajustes de simulación"):
-    iterations = st.number_input(
-        "Iteraciones", min_value=1_000, max_value=200_000, value=sim.DEFAULT_ITERATIONS, step=1_000
-    )
+    st.session_state.setdefault("w_iter", sim.DEFAULT_ITERATIONS)
+    iterations = st.number_input("Iteraciones", min_value=1_000, max_value=200_000, step=1_000, key="w_iter")
+    st.session_state.setdefault("w_sigma", sim.DEFAULT_SIGMA)
     sigma = st.slider(
-        "Dispersion (sigma, puntos)", min_value=1.0, max_value=10.0, value=sim.DEFAULT_SIGMA, step=0.25,
+        "Dispersion (sigma, puntos)", min_value=1.0, max_value=10.0, step=0.25, key="w_sigma",
         help="Mayor sigma = carrera mas impredecible (mas probabilidad a los outsiders).",
     )
-    seed_value = st.number_input("Semilla (0 = aleatoria)", min_value=0, value=0, step=1)
+    st.session_state.setdefault("w_seed", 0)
+    seed_value = st.number_input("Semilla (0 = aleatoria)", min_value=0, step=1, key="w_seed")
 
 context_slot.markdown(
     context_html(
@@ -927,3 +979,5 @@ if saved:
         else:
             st.session_state["saved_race_id"] = race_id
             st.rerun()
+
+persist_session(edited_df)
