@@ -18,6 +18,7 @@ load_dotenv()
 
 from config import database as db  # noqa: E402
 from services import simulator as sim  # noqa: E402
+from services import picks as pk  # noqa: E402
 from services.analysis import build_analysis  # noqa: E402
 from services.extractor import (  # noqa: E402
     MAX_IMAGES,
@@ -210,6 +211,12 @@ padding:.85rem 1rem}
 .cm p{margin:.15rem 0 .5rem;font-size:.9rem;line-height:1.5;color:var(--ink)}
 .cm-t{font-weight:700;color:var(--deep);font-size:.95rem}
 .cm ul{margin:.2rem 0 0 1.1rem;padding:0}.cm li{font-size:.84rem;line-height:1.45;margin-bottom:.3rem;color:var(--ink)}
+
+/* Pick 3-4-5-6 */
+.pk-leg{display:flex;gap:.9rem;padding:.4rem 0;border-top:1px solid rgba(26,16,56,.12);font-size:.9rem}
+.pk-race{font-weight:700;color:var(--deep);min-width:5.4rem}
+.pk-h{color:var(--ink);overflow-wrap:anywhere}.pk-h small{color:var(--muted)}
+.pk-note{font-size:.76rem;color:var(--muted);margin-top:.6rem;line-height:1.4}
 
 @media (max-width:760px){
 .block-container,[data-testid="stMainBlockContainer"]{padding:0 .8rem 3rem!important}
@@ -582,6 +589,43 @@ def commentary_html(analysis: dict) -> str:
     )
 
 
+
+def pick_card_html(option: dict, multiplier: int) -> str:
+    legs = []
+    for leg in option["legs"]:
+        horses = ", ".join(
+            f'<b>{escape(h["program_number"])}</b> {escape(h["name"])}'
+            + (f' <small>({escape(h["morning_line"])})</small>' if h["morning_line"] else "")
+            for h in pk.sorted_horses(leg["horses"])
+        )
+        legs.append(
+            f'<div class="pk-leg"><div class="pk-race">Carrera {leg["race_number"]}</div>'
+            f'<div class="pk-h">{horses}</div></div>'
+        )
+    first, last = option["races"][0], option["races"][-1]
+    return (
+        '<div class="so">'
+        '<div class="so-t">Mejor pick segun el analisis</div>'
+        f'<div class="so-n">Pick {option["size"]} - carreras {first} a {last}</div>'
+        + "".join(legs)
+        + "</div>"
+    )
+
+
+def pick_kpis_html(option: dict, multiplier: int) -> str:
+    tiles = [
+        ("Combinaciones", f'{option["combos"]:,}', f'x ${option["stake"]:,.2f} por combinacion'),
+        ("Costo del tiquete", f'${option["cost"]:,.2f}', f'base x{multiplier}'),
+        ("Prob. de acertar", f'{option["hit"]:.1%}', "las piernas se toman como independientes"),
+        ("Retorno esperado", f'${option["expected_return"]:,.2f}', f'EV {option["ev"]:+,.2f} ({option["roi"]:+.0%})'),
+    ]
+    return '<div class="kpis">' + "".join(
+        f'<div class="kpi"><div class="kpi-l">{label}</div><div class="kpi-v">{value}</div>'
+        f'<div class="kpi-s">{sub}</div></div>'
+        for label, value, sub in tiles
+    ) + "</div>"
+
+
 # ---------------------------------------------------------------------------
 # Cabecera
 # ---------------------------------------------------------------------------
@@ -596,7 +640,9 @@ track = TRACK_NAME
 # ---------------------------------------------------------------------------
 SESSION_STORE_MAX = 40
 PERSISTED_PREFIXES = ("w_", "name_", "distance_", "surface_", "cond_")
-PERSISTED_KEYS = ("horses_df", "editor_version", "results", "source_filename", "saved_race_id")
+PERSISTED_KEYS = (
+    "horses_df", "editor_version", "results", "source_filename", "saved_race_id", "pick_races", "pick_result",
+)
 
 
 @st.cache_resource
@@ -964,6 +1010,24 @@ if saved:
     with st.expander("Tabla detallada con todos los ajustes"):
         st.dataframe(style_results(build_results_table(results)), hide_index=True)
 
+    race_info = saved["race"]
+    race_number_value = race_info.get("race_number")
+    if not race_number_value:
+        st.caption("Para usar esta carrera en un Pick 3-4-5-6, ponle su numero en el paso 01 y vuelve a simular.")
+    elif st.button(f"Agregar la carrera {race_number_value} al pick", key="add_pick_race"):
+        st.session_state.setdefault("pick_races", {})[int(race_number_value)] = {
+            "race_number": int(race_number_value),
+            "race_name": race_info["race_name"],
+            "records": [
+                {key: record.get(key) for key in (
+                    "program_number", "name", "morning_line", "win_probability", "implied_probability",
+                )}
+                for record in records
+            ],
+        }
+        st.session_state.pop("pick_result", None)
+        st.success(f"Carrera {race_number_value} agregada. Mas abajo, en el paso 06, armas el pick.")
+
     step_header("05", "Guardar análisis", "Conserva la carrera, los caballos y los resultados")
     if not db_ok:
         st.caption("El guardado no esta configurado (revisa el archivo .env).")
@@ -979,5 +1043,137 @@ if saved:
         else:
             st.session_state["saved_race_id"] = race_id
             st.rerun()
+
+# ---------------------------------------------------------------------------
+# 06 Pick 3 / 4 / 5 / 6
+# ---------------------------------------------------------------------------
+step_header(
+    "06", "Pick 3 / 4 / 5 / 6",
+    "Combina varias carreras simuladas y elige el mejor pick segun tu presupuesto",
+)
+pick_races = st.session_state.get("pick_races") or {}
+if not pick_races:
+    st.caption(
+        "Simula cada carrera (con su numero en el paso 01) y pulsa \"Agregar la carrera al pick\" debajo de los "
+        "resultados. Para un Pick 4 necesitas 4 carreras seguidas, por ejemplo 7, 8, 9 y 10."
+    )
+else:
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Carrera": number,
+                    "Nombre": pick_races[number]["race_name"],
+                    "Caballos": len(pick_races[number]["records"]),
+                    "Favorito (modelo)": max(
+                        pick_races[number]["records"], key=lambda r: r["win_probability"]
+                    )["name"],
+                }
+                for number in sorted(pick_races)
+            ]
+        ),
+        hide_index=True,
+    )
+    remove_numbers = st.multiselect("Quitar carreras de la lista", sorted(pick_races), key="w_pick_remove")
+    if remove_numbers and st.button("Quitar seleccionadas"):
+        for number in remove_numbers:
+            pick_races.pop(number, None)
+        st.session_state.pop("pick_result", None)
+        st.session_state["w_pick_remove"] = []
+        st.rerun()
+
+    with st.expander("Parametros del pick", expanded=True):
+        st.session_state.setdefault("w_pick_sizes", list(pk.PICK_SIZES))
+        pick_sizes = st.multiselect(
+            "Tipos de pick a evaluar", list(pk.PICK_SIZES), key="w_pick_sizes", format_func=lambda n: f"Pick {n}"
+        )
+        col_p, col_m = st.columns(2)
+        with col_p:
+            st.session_state.setdefault("w_pick_budget", 24.0)
+            pick_budget = st.number_input(
+                "Cuanto quieres gastar (USD)", min_value=0.1, step=1.0, format="%.2f", key="w_pick_budget",
+                help="Presupuesto maximo del tiquete. El sistema reparte los caballos sin pasarse de este valor.",
+            )
+        with col_m:
+            st.session_state.setdefault("w_pick_mult", 1)
+            pick_multiplier = st.number_input(
+                "Multiplicador", min_value=1, max_value=100, step=1, key="w_pick_mult",
+                help="Multiplica el costo base de cada combinacion. Con base $0.50 y multiplicador 2, cada combinacion cuesta $1.00.",
+            )
+        st.markdown('<div class="sub-h">Costo base por combinacion (USD)</div>', unsafe_allow_html=True)
+        base_columns = st.columns(4)
+        base_costs = {}
+        for column, size in zip(base_columns, pk.PICK_SIZES):
+            with column:
+                st.session_state.setdefault(f"w_base_{size}", pk.DEFAULT_BASE_COSTS[size])
+                base_costs[size] = st.number_input(
+                    f"Pick {size}", min_value=0.05, step=0.05, format="%.2f", key=f"w_base_{size}"
+                )
+        st.session_state.setdefault("w_pick_goal", "value")
+        pick_goal = st.selectbox(
+            "Que buscar", list(pk.GOALS), key="w_pick_goal", format_func=lambda g: pk.GOAL_LABELS[g],
+            help="La probabilidad favorece los picks cortos (mas faciles de acertar). El EV favorece los picks donde "
+                 "el modelo ve mas valor que el mercado.",
+        )
+        st.session_state.setdefault("w_pick_takeout", 20)
+        pick_takeout = st.slider(
+            "Deduccion del pool (takeout, %)", min_value=0, max_value=35, step=1, key="w_pick_takeout",
+            help="Porcentaje que se queda la pista. Afecta al retorno esperado estimado.",
+        )
+
+    if st.button("Construir el mejor pick", type="primary", key="build_pick"):
+        if not pick_sizes:
+            st.error("Elige al menos un tipo de pick.")
+        else:
+            try:
+                built_legs = [
+                    pk.build_leg(number, data["race_name"], data["records"]) for number, data in pick_races.items()
+                ]
+                st.session_state["pick_result"] = {
+                    "options": pk.build_picks(
+                        built_legs, pick_sizes, base_costs, int(pick_multiplier), float(pick_budget),
+                        pick_goal, pick_takeout / 100.0,
+                    ),
+                    "multiplier": int(pick_multiplier),
+                    "goal": pick_goal,
+                    "budget": float(pick_budget),
+                }
+            except pk.PickError as exc:
+                st.session_state.pop("pick_result", None)
+                st.error(str(exc))
+
+pick_result = st.session_state.get("pick_result")
+if pick_result and pick_races:
+    best_option = pick_result["options"][0]
+    st.markdown(pick_card_html(best_option, pick_result["multiplier"]), unsafe_allow_html=True)
+    st.markdown(pick_kpis_html(best_option, pick_result["multiplier"]), unsafe_allow_html=True)
+    st.markdown('<div class="sub-h">Tiquete para copiar</div>', unsafe_allow_html=True)
+    st.code(pk.ticket_text(best_option, pick_result["multiplier"]), language=None)
+    if len(pick_result["options"]) > 1:
+        with st.expander("Otras opciones evaluadas"):
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Pick": f'Pick {o["size"]}',
+                            "Carreras": f'{o["races"][0]} a {o["races"][-1]}',
+                            "Combinaciones": o["combos"],
+                            "Costo (USD)": round(o["cost"], 2),
+                            "Prob. de acertar": f'{o["hit"]:.1%}',
+                            "Retorno esperado (USD)": round(o["expected_return"], 2),
+                            "EV (USD)": round(o["ev"], 2),
+                        }
+                        for o in pick_result["options"][:12]
+                    ]
+                ),
+                hide_index=True,
+            )
+    st.markdown(
+        '<div class="pk-note">Estimacion: usa la probabilidad simulada de cada carrera y el Morning Line como '
+        "referencia del mercado, con las carreras como eventos independientes. Los pagos reales dependen del pool y de "
+        "las cuotas finales; actualiza el ML en la tabla del paso 03 si cambian. Es una herramienta analitica; "
+        "las apuestas conllevan riesgo de perdida.</div>",
+        unsafe_allow_html=True,
+    )
 
 persist_session(edited_df)
