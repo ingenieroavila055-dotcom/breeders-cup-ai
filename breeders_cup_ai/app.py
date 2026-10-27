@@ -19,6 +19,7 @@ load_dotenv()
 from config import database as db  # noqa: E402
 from services import simulator as sim  # noqa: E402
 from services import picks as pk  # noqa: E402
+from services import backtest as bt  # noqa: E402
 from services.analysis import build_analysis  # noqa: E402
 from services.extractor import (  # noqa: E402
     MAX_IMAGES,
@@ -175,6 +176,9 @@ background:var(--page);color:var(--purple)}
 .lb-probval{font-weight:700;font-size:1.05rem;color:var(--deep);font-variant-numeric:tabular-nums}
 .lb-bar{height:6px;background:#ebe6f5;border-radius:3px;margin-top:.3rem;overflow:hidden}
 .lb-bar span{display:block;height:100%;background:linear-gradient(90deg,var(--purple),var(--gold))}
+.vd{display:inline-block;font-weight:800;font-size:.68rem;letter-spacing:.04em;padding:.05rem .5rem;border-radius:4px}
+.vd-fijo{background:#1f6b3a;color:#fff}.vd-contender{background:#efe3c3;color:#6b5420}.vd-tirar{background:#eceaea;color:#7a7373}
+.vd-c{font-size:.68rem;color:var(--muted);margin-left:.35rem}.lb-vd{margin-top:.3rem}
 .evp{display:inline-block;font-weight:700;font-size:.8rem;padding:.2rem .5rem;border-radius:4px;
 font-variant-numeric:tabular-nums}
 .evp.pos{background:#e4f4ea;color:var(--pos)}.evp.neg{background:#fbeceb;color:var(--neg)}.evp.na{background:var(--page);color:var(--muted)}
@@ -262,73 +266,118 @@ BREEDERS_CUP_RACES = [
 ]
 
 DEMO_FIELD = [
-    {"program_number": "1", "name": "Demo Rapido", "morning_line": "5/2", "base_speed_figure": 100,
-     "running_style": "E", "form_trend": "Plateau", "class_rating": "Graded_Placed",
-     "jockey": "Irad Ortiz Jr.", "is_regular_jockey": True, "jockey_switch": "Neutral",
-     "track_aptitude": "Positive", "weight_lbs": 126, "last_weight_lbs": 126},
-    {"program_number": "2", "name": "Demo Europeo", "morning_line": "7/2", "base_speed_figure": 101,
-     "foreign_origin": "Europe", "foreign_level": "G1_Winner", "running_style": "P",
-     "form_trend": "Plateau", "class_rating": "G1_Winner", "jockey": "Ryan Moore",
-     "is_regular_jockey": True, "track_aptitude": "First_Time", "mud_proven": True,
+    {"program_number": "1", "name": "Demo Rapido", "morning_line": "5/2",
+     "figures": "100 T 8; 98 T 8; 99 D 8; 97 T 8", "running_style": "E", "quirin_points": 7,
+     "form_trend": "Plateau", "class_rating": "Graded_Placed", "jockey": "Irad Ortiz Jr.",
+     "is_regular_jockey": True, "jockey_switch": "Neutral", "track_aptitude": "Positive",
+     "days_since_last": 28, "post_position": 3, "weight_lbs": 126, "last_weight_lbs": 126},
+    {"program_number": "2", "name": "Demo Europeo", "morning_line": "7/2",
+     "intl_ratings": "118; 115; 117", "intl_rating_kind": "Timeform", "foreign_origin": "Europe",
+     "foreign_level": "G1_Winner", "first_us_start": True, "running_style": "P", "form_trend": "Plateau",
+     "class_rating": "G1_Winner", "jockey": "Ryan Moore", "is_regular_jockey": True,
+     "track_aptitude": "First_Time", "going_pref": "Any", "mud_proven": True,
+     "days_since_last": 35, "post_position": 5, "weight_lbs": 126, "last_weight_lbs": 126},
+    {"program_number": "3", "name": "Demo Japones", "morning_line": "9/2",
+     "intl_ratings": "116; 114", "intl_rating_kind": "Other", "foreign_origin": "Japan",
+     "foreign_level": "G1_Placed", "first_us_start": True, "running_style": "S", "form_trend": "Ascending",
+     "class_rating": "Graded_Placed", "jockey": "Y. Take", "is_regular_jockey": True,
+     "track_aptitude": "First_Time", "days_since_last": 42, "post_position": 7,
+     "weight_lbs": 126, "last_weight_lbs": 124},
+    {"program_number": "4", "name": "Demo Presser", "morning_line": "6/1",
+     "figures": "99 T 8; 97 T 8; 96 D 8", "running_style": "P", "quirin_points": 4, "form_trend": "Plateau",
+     "class_rating": "Graded_Placed", "jockey": "Flavien Prat", "is_regular_jockey": True,
+     "track_aptitude": "Positive", "days_since_last": 30, "post_position": 4,
      "weight_lbs": 126, "last_weight_lbs": 126},
-    {"program_number": "3", "name": "Demo Japones", "morning_line": "9/2", "base_speed_figure": 102,
-     "foreign_origin": "Japan", "foreign_level": "G1_Placed", "dirt_debut": True, "running_style": "S",
-     "form_trend": "Ascending", "class_rating": "Graded_Placed", "jockey": "Y. Take",
-     "is_regular_jockey": True, "track_aptitude": "First_Time", "weight_lbs": 126, "last_weight_lbs": 124},
-    {"program_number": "4", "name": "Demo Presser", "morning_line": "6/1", "base_speed_figure": 99,
-     "running_style": "P", "form_trend": "Plateau", "class_rating": "Graded_Placed",
-     "jockey": "Flavien Prat", "is_regular_jockey": True, "track_aptitude": "Positive",
+    {"program_number": "5", "name": "Demo Cerrador", "morning_line": "8/1",
+     "figures": "98 T 8; 94 T 8; 92 T 8", "running_style": "S", "quirin_points": 1, "form_trend": "Ascending",
+     "class_rating": "Graded_Placed", "jockey": "J. Smith", "is_regular_jockey": True,
+     "track_aptitude": "Positive", "days_since_last": 21, "post_position": 8,
      "weight_lbs": 126, "last_weight_lbs": 126},
-    {"program_number": "5", "name": "Demo Cerrador", "morning_line": "8/1", "base_speed_figure": 98,
-     "running_style": "S", "form_trend": "Ascending", "class_rating": "Graded_Placed",
-     "jockey": "J. Smith", "is_regular_jockey": True, "track_aptitude": "Positive",
-     "weight_lbs": 126, "last_weight_lbs": 126},
-    {"program_number": "6", "name": "Demo Subida", "morning_line": "12/1", "base_speed_figure": 96,
-     "running_style": "P", "form_trend": "Descending", "class_rating": "Class_Riser",
-     "jockey": "A. Perez", "is_regular_jockey": True, "track_aptitude": "Negative",
+    {"program_number": "6", "name": "Demo Subida", "morning_line": "12/1",
+     "figures": "96 T 8; 99 T 8; 97 D 8", "running_style": "P", "quirin_points": 3, "form_trend": "Descending",
+     "class_rating": "Class_Riser", "jockey": "A. Perez", "is_regular_jockey": True,
+     "track_aptitude": "Negative", "days_since_last": 60, "post_position": 2,
      "weight_lbs": 126, "last_weight_lbs": 120},
-    {"program_number": "7", "name": "Demo Lodo", "morning_line": "15/1", "base_speed_figure": 95,
-     "running_style": "S", "form_trend": "Plateau", "class_rating": "Graded_Placed",
-     "jockey": "L. Saez", "is_regular_jockey": True, "track_aptitude": "First_Time", "mud_proven": True,
+    {"program_number": "7", "name": "Demo Lodo", "morning_line": "15/1",
+     "figures": "95 T 8; 93 D 8", "running_style": "S", "quirin_points": 0, "form_trend": "Plateau",
+     "class_rating": "Graded_Placed", "jockey": "L. Saez", "is_regular_jockey": True,
+     "track_aptitude": "First_Time", "mud_proven": True, "days_since_last": 25, "post_position": 9,
      "weight_lbs": 126, "last_weight_lbs": 126},
-    {"program_number": "8", "name": "Demo Retirado", "morning_line": "20/1", "base_speed_figure": 90,
+    {"program_number": "8", "name": "Demo Retirado", "morning_line": "20/1", "figures": "90 D 8",
      "running_style": "E", "scratched": True},
 ]
 
+def _text(label, help=None, width=None):
+    return st.column_config.TextColumn(label, help=help, width=width)
+
+
+def _num(label, low=0, high=None, step=1, help=None):
+    return st.column_config.NumberColumn(label, min_value=low, max_value=high, step=step, help=help)
+
+
+def _pick(label, options, help=None, width=None):
+    return st.column_config.SelectboxColumn(label, options=list(options), help=help, width=width)
+
+
+def _check(label, help=None):
+    return st.column_config.CheckboxColumn(label, help=help)
+
+
 EDITOR_COLUMNS = {
-    "program_number": st.column_config.TextColumn("#", width="small"),
+    "program_number": _text("#", width="small"),
     "name": st.column_config.TextColumn("Caballo", required=True),
-    "morning_line": st.column_config.TextColumn("ML", help="Morning Line. Ej: 5/2, 9-2, even", width="small"),
-    "base_speed_figure": st.column_config.NumberColumn("Speed Fig", min_value=0, max_value=120, step=1, width="small"),
-    "foreign_origin": st.column_config.SelectboxColumn("Origen", options=list(sim.FOREIGN_ORIGINS)),
-    "foreign_level": st.column_config.SelectboxColumn("Nivel extranjero", options=list(sim.FOREIGN_LEVELS)),
-    "dirt_debut": st.column_config.CheckboxColumn("Debut en Dirt"),
-    "form_trend": st.column_config.SelectboxColumn("Forma", options=list(sim.FORM_TRENDS)),
-    "class_rating": st.column_config.SelectboxColumn("Lote", options=list(sim.CLASS_RATINGS)),
-    "jockey": st.column_config.TextColumn("Jinete"),
-    "is_regular_jockey": st.column_config.CheckboxColumn("Jinete habitual"),
-    "jockey_switch": st.column_config.SelectboxColumn("Cambio jinete", options=list(sim.JOCKEY_SWITCHES)),
-    "track_aptitude": st.column_config.SelectboxColumn("Aptitud pista", options=list(sim.TRACK_APTITUDES)),
-    "mud_proven": st.column_config.CheckboxColumn("Probado en fango"),
-    "running_style": st.column_config.SelectboxColumn("Estilo", options=list(sim.RUNNING_STYLES), width="small"),
-    "weight_lbs": st.column_config.NumberColumn("Peso (lbs)", min_value=0, step=1),
-    "last_weight_lbs": st.column_config.NumberColumn("Peso ult. (lbs)", min_value=0, step=1),
-    "scratched": st.column_config.CheckboxColumn("Retirado"),
+    "morning_line": _text("ML", "Morning Line. Solo se usa para el EV y el pago estimado del pick, nunca para calificar al caballo.", "small"),
+    "figures": _text("Figuras (Beyer)", "De la mas reciente a la mas antigua: '92 T 8; 88 D 8.5'. Figura, superficie (D/T/S) y distancia en furlongs; los dos ultimos son opcionales."),
+    "intl_ratings": _text("Rating intl.", "Timeform/RPR/otro de las ultimas salidas, de la mas reciente a la mas antigua: '118; 115; 117'."),
+    "intl_rating_kind": _pick("Tipo rating", sim.RATING_KINDS),
+    "base_speed_figure": _num("Speed Fig (manual)", 0, 130, 1, "Opcional: se usa solo si no hay figuras."),
+    "foreign_origin": _pick("Origen", sim.FOREIGN_ORIGINS),
+    "foreign_level": _pick("Nivel extranjero", sim.FOREIGN_LEVELS),
+    "first_us_start": _check("1.a salida en EE.UU."),
+    "form_trend": _pick("Forma", sim.FORM_TRENDS, "Se calcula de las figuras cuando hay 3 o mas."),
+    "class_rating": _pick("Lote", sim.CLASS_RATINGS),
+    "earnings_per_start": _num("Ganancias/salida ($)", 0, None, 1000),
+    "running_style": _pick("Estilo", sim.RUNNING_STYLES, width="small"),
+    "quirin_points": _num("Quirin", 0, 8, 1, "Puntos de velocidad temprana (0-8) del DRF."),
+    "jockey": _text("Jinete"),
+    "is_regular_jockey": _check("Jinete habitual"),
+    "jockey_switch": _pick("Cambio jinete", sim.JOCKEY_SWITCHES),
+    "jockey_win_pct": _num("Jinete % gana", 0, 100, 1),
+    "trainer": _text("Entrenador"),
+    "trainer_win_pct": _num("Entren. % gana", 0, 100, 1),
+    "trainer_situation_pct": _num("Entren. % situacion", 0, 100, 1, "% de victorias del entrenador en esta situacion (grama, 1.a vez equipo, etc.)."),
+    "combo_win_pct": _num("Combo % gana", 0, 100, 1, "% de victorias de la dupla entrenador-jinete."),
+    "sire": _text("Padre"),
+    "dam_sire": _text("Padre de la madre"),
+    "ped_surface_fit": _pick("Pedigri superficie", sim.FIT_LEVELS),
+    "ped_distance_fit": _pick("Pedigri distancia", sim.FIT_LEVELS),
+    "ped_wet_fit": _pick("Pedigri humedo", sim.FIT_LEVELS),
+    "track_aptitude": _pick("Aptitud pista", sim.TRACK_APTITUDES),
+    "mud_proven": _check("Probado en fango"),
+    "going_pref": _pick("Terreno preferido", sim.GOING_PREFS),
+    "dirt_starts": _num("Salidas dirt"), "dirt_wins": _num("Gana dirt"),
+    "turf_starts": _num("Salidas grama"), "turf_wins": _num("Gana grama"),
+    "dist_starts": _num("Salidas distancia"), "dist_wins": _num("Gana distancia"),
+    "wet_starts": _num("Salidas humedo"), "wet_wins": _num("Gana humedo"),
+    "days_since_last": _num("Dias descanso"),
+    "starts_90d": _num("Salidas 90d"),
+    "workouts_30d": _num("Trabajos 30d"),
+    "bullet_work": _check("Trabajo bullet"),
+    "blinkers_change": _pick("Anteojeras", sim.BLINKERS_CHANGES),
+    "lasix_first": _check("Lasix 1.a vez"),
+    "post_position": _num("Puesto", 1, 24),
+    "trouble_last": _check("Problemas ult. carrera"),
+    "weight_lbs": _num("Peso (lbs)"),
+    "last_weight_lbs": _num("Peso ult. (lbs)"),
+    "scratched": _check("Retirado"),
 }
 COMPACT_COLUMNS = [
-    "program_number", "name", "morning_line", "base_speed_figure",
-    "running_style", "form_trend", "class_rating", "jockey", "scratched",
+    "program_number", "name", "morning_line", "figures", "intl_ratings", "running_style", "quirin_points",
+    "form_trend", "class_rating", "jockey", "scratched",
 ]
-CHIP_LABELS = {
-    "adj_foreign": "Extranjero",
-    "adj_form": "Forma",
-    "adj_class": "Lote",
-    "adj_jockey": "Jinete",
-    "adj_track": "Pista",
-    "adj_condition": "Condicion",
-    "adj_pace": "Ritmo",
-    "adj_weight": "Peso",
-}
+CHIP_LABELS = dict(sim.ADJUSTMENT_LABELS)
+CHIP_MAX = 5
+VERDICT_LABELS = {"FIJO": "FIJO", "CONTENDER": "CONTENDER", "TIRAR": "TIRAR"}
 STYLE_LABELS = {"E": "Puntero", "P": "Presser", "S": "Rematador"}
 
 
@@ -339,8 +388,9 @@ def horses_to_dataframe(horses: list[dict]) -> pd.DataFrame:
     """DataFrame con todas las columnas del editor y tipos consistentes."""
     cleaned = [sim.normalize_horse(h) for h in horses]
     frame = pd.DataFrame(cleaned, columns=list(sim.HORSE_FIELDS))
-    for column in ("base_speed_figure", "weight_lbs", "last_weight_lbs"):
-        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    for column in set(sim.FLOAT_FIELDS) | set(sim.INT_FIELDS):
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
     return frame
 
 
@@ -352,21 +402,19 @@ def set_horses(horses: list[dict]) -> None:
 
 
 def build_results_table(results: pd.DataFrame) -> pd.DataFrame:
-    return pd.DataFrame(
+    data = {
+        "Pos": results["rank"],
+        "#": results["program_number"],
+        "Caballo": results["name"],
+        "Veredicto": results["verdict"],
+        "Confianza": results["confidence_level"],
+        "ML": results["morning_line"],
+        "Base": results["base_speed_figure"],
+    }
+    for column in sim.ADJUSTMENT_COLUMNS:
+        data[sim.ADJUSTMENT_LABELS[column]] = results[column]
+    data.update(
         {
-            "Pos": results["rank"],
-            "#": results["program_number"],
-            "Caballo": results["name"],
-            "ML": results["morning_line"],
-            "Base": results["base_speed_figure"],
-            "Extranjero": results["adj_foreign"],
-            "Forma": results["adj_form"],
-            "Lote": results["adj_class"],
-            "Jinete": results["adj_jockey"],
-            "Pista": results["adj_track"],
-            "Condicion": results["adj_condition"],
-            "Ritmo": results["adj_pace"],
-            "Peso": results["adj_weight"],
             "Rating final": results["final_adjusted_rating"],
             "Prob. simulada": results["win_probability"],
             "Prob. implicita": results["implied_probability"],
@@ -374,6 +422,7 @@ def build_results_table(results: pd.DataFrame) -> pd.DataFrame:
             "EV": results["expected_value"],
         }
     )
+    return pd.DataFrame(data)
 
 
 def style_results(table: pd.DataFrame):
@@ -382,24 +431,23 @@ def style_results(table: pd.DataFrame):
         color = "background-color: rgba(184, 153, 90, 0.22); font-weight: 600" if positive else ""
         return [color] * len(row)
 
-    return table.style.apply(highlight, axis=1).format(
+    formats = {"Base": "{:.1f}", "Rating final": "{:.2f}", "Prob. simulada": "{:.1%}",
+               "Prob. implicita": "{:.1%}", "Cuota decimal": "{:.2f}", "EV": "{:+.1%}"}
+    formats.update({sim.ADJUSTMENT_LABELS[c]: "{:+.2f}" for c in sim.ADJUSTMENT_COLUMNS})
+    return table.style.apply(highlight, axis=1).format(formats, na_rep="n/d")
+
+
+def data_quality_table(results: pd.DataFrame) -> pd.DataFrame:
+    return pd.DataFrame(
         {
-            "Base": "{:.1f}",
-            "Extranjero": "{:+.2f}",
-            "Forma": "{:+.2f}",
-            "Lote": "{:+.2f}",
-            "Jinete": "{:+.2f}",
-            "Pista": "{:+.2f}",
-            "Condicion": "{:+.2f}",
-            "Ritmo": "{:+.2f}",
-            "Peso": "{:+.2f}",
-            "Rating final": "{:.2f}",
-            "Prob. simulada": "{:.1%}",
-            "Prob. implicita": "{:.1%}",
-            "Cuota decimal": "{:.2f}",
-            "EV": "{:+.1%}",
-        },
-        na_rep="n/d",
+            "#": results["program_number"],
+            "Caballo": results["name"],
+            "Confianza": results["confidence_level"],
+            "Puntaje": results["confidence"],
+            "Figuras leidas": results["n_figures"],
+            "Datos no disponibles": results["missing"].apply(lambda m: ", ".join(m) if m else "ninguno"),
+            "Notas del modelo": results["notes"].apply(lambda n: " | ".join(n) if isinstance(n, (list, tuple)) else (n or "")),
+        }
     )
 
 
@@ -437,14 +485,26 @@ def context_html(items: list[tuple[str, str]]) -> str:
 
 
 def _chips(record: dict) -> str:
-    chips = []
+    items = []
     for column, label in CHIP_LABELS.items():
-        value = float(record[column])
-        if abs(value) >= 0.005:
-            css = "chip" if value > 0 else "chip neg"
-            decimals = 1 if abs(value * 10 - round(value * 10)) < 1e-9 else 2
-            chips.append(f'<span class="{css}">{escape(label)} {value:+.{decimals}f}</span>')
+        value = float(record.get(column) or 0.0)
+        if abs(value) >= 0.05:
+            items.append((abs(value), label, value))
+    items.sort(reverse=True)
+    chips = []
+    for _, label, value in items[:CHIP_MAX]:
+        css = "chip" if value > 0 else "chip neg"
+        chips.append(f'<span class="{css}">{escape(label)} {value:+.1f}</span>')
     return f'<div class="lb-chips">{"".join(chips)}</div>' if chips else ""
+
+
+def _verdict_pill(record: dict) -> str:
+    verdict = record.get("verdict")
+    if not verdict:
+        return ""
+    level = record.get("confidence_level") or ""
+    conf = f" · conf. {escape(str(level))}" if level else ""
+    return f'<span class="vd vd-{escape(str(verdict).lower())}">{escape(str(verdict))}</span><span class="vd-c">{conf}</span>'
 
 
 def _ev_pill(record: dict) -> str:
@@ -495,6 +555,7 @@ def leaderboard_html(records: list[dict], horses: list[dict]) -> str:
             f'<div class="lb-horse"><div class="lb-name"><span class="lb-num">{escape(str(record["program_number"]))}</span>'
             f'{escape(str(record["name"]))}</div><div class="lb-meta">{meta}</div>'
             f'<div class="lb-m">ML {morning_line} · Rating {record["final_adjusted_rating"]:.1f}</div>'
+            f'<div class="lb-vd">{_verdict_pill(record)}</div>'
             f"{_chips(record)}</div>"
             f'<div class="lb-rating">{record["final_adjusted_rating"]:.1f}</div>'
             f'<div class="lb-prob"><div class="lb-probval">{record["win_probability"]:.1%}</div>'
@@ -727,6 +788,60 @@ with st.expander("Ajustes de simulación"):
     st.session_state.setdefault("w_seed", 0)
     seed_value = st.number_input("Semilla (0 = aleatoria)", min_value=0, step=1, key="w_seed")
 
+with st.expander("Sesgo de la pista del dia (lo ingresas tu)"):
+    st.caption("Mira como se corrieron las carreras anteriores del dia en Keeneland. Si no hay informacion, deja Neutral.")
+    col_bs, col_br = st.columns(2)
+    with col_bs:
+        st.session_state.setdefault("w_bias_speed", "Neutral")
+        bias_speed = st.selectbox("Sesgo de ritmo", list(sim.BIAS_SPEED_OPTIONS), key="w_bias_speed",
+                                  format_func=lambda v: {"Neutral": "Neutral", "Speed": "Favorece punteros", "Closers": "Favorece rematadores"}[v])
+    with col_br:
+        st.session_state.setdefault("w_bias_rail", "Neutral")
+        bias_rail = st.selectbox("Sesgo de riel", list(sim.BIAS_RAIL_OPTIONS), key="w_bias_rail",
+                                 format_func=lambda v: {"Neutral": "Neutral", "Inside": "Favorece adentro", "Outside": "Favorece afuera"}[v])
+
+WEIGHT_GROUPS = [
+    ("Multiplicador de cada factor (1.0 = normal, 0 = ignorar, 2.0 = doble)", list(sim.ADJUSTMENT_COLUMNS)),
+]
+
+
+def _reset_weights() -> None:
+    for key, default in sim.DEFAULT_WEIGHTS.items():
+        st.session_state[f"w_wt_{key}"] = default
+
+
+with st.expander("Pesos del sistema (avanzado)"):
+    st.caption("Ajusta cuanto pesa cada factor. Los valores por defecto son un punto de partida razonable, "
+               "no una verdad validada: usa los resultados reales del paso 07 para calibrarlos.")
+    weights: dict[str, float] = {}
+    for column in sim.ADJUSTMENT_COLUMNS:
+        st.session_state.setdefault(f"w_wt_{column}", sim.DEFAULT_WEIGHTS[column])
+    for key in ("base_recency", "base_peak", "base_condition", "decay", "intl_factor", "intl_offset"):
+        st.session_state.setdefault(f"w_wt_{key}", sim.DEFAULT_WEIGHTS[key])
+    wt_cols = st.columns(3)
+    for index, column in enumerate(sim.ADJUSTMENT_COLUMNS):
+        with wt_cols[index % 3]:
+            weights[column] = st.number_input(sim.ADJUSTMENT_LABELS[column], min_value=0.0, max_value=3.0,
+                                              step=0.1, key=f"w_wt_{column}")
+    st.markdown('<div class="sub-h">Como se arma la base de rating</div>', unsafe_allow_html=True)
+    b1, b2, b3 = st.columns(3)
+    with b1:
+        weights["base_recency"] = st.number_input("Peso recencia", min_value=0.0, max_value=1.0, step=0.05, key="w_wt_base_recency")
+    with b2:
+        weights["base_peak"] = st.number_input("Peso mejor figura", min_value=0.0, max_value=1.0, step=0.05, key="w_wt_base_peak")
+    with b3:
+        weights["base_condition"] = st.number_input("Peso condiciones de hoy", min_value=0.0, max_value=1.0, step=0.05, key="w_wt_base_condition")
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        weights["decay"] = st.number_input("Decaimiento por carrera", min_value=0.3, max_value=1.0, step=0.05, key="w_wt_decay",
+                                           help="Cuanto pierde importancia cada carrera mas antigua (0.75 = la anterior vale 75% de la siguiente).")
+    with d2:
+        weights["intl_factor"] = st.number_input("Factor rating intl. a Beyer", min_value=0.5, max_value=1.5, step=0.05, key="w_wt_intl_factor",
+                                                 help="Beyer equivalente = rating x factor + ajuste. 0.90 es una suposicion no validada.")
+    with d3:
+        weights["intl_offset"] = st.number_input("Ajuste rating intl.", min_value=-30.0, max_value=30.0, step=1.0, key="w_wt_intl_offset")
+    st.button("Restablecer pesos", on_click=_reset_weights)
+
 context_slot.markdown(
     context_html(
         [
@@ -874,6 +989,12 @@ if extract_clicked:
                 race_hint=race_name or None,
                 track=track,
                 pages=pdf_pages_spec or None,
+                conditions={
+                    "surface": surface,
+                    "distance": distance or None,
+                    "track_condition": track_condition,
+                    "race_date": race_date.isoformat(),
+                },
             )
         except ExtractionError as exc:
             st.error(str(exc))
@@ -920,7 +1041,7 @@ step_header(
     "03", "Revisión de datos",
     "Toca una celda para editarla. El ML acepta 5/2, 9-2 o even. Marca Retirado para excluir un caballo.",
 )
-show_all = st.toggle("Editar todas las variables", value=False, help="Activa para ver las 18 columnas.")
+show_all = st.toggle("Editar todas las variables", value=False, help="Activa para ver todas las columnas.")
 edited_df = st.data_editor(
     st.session_state["horses_df"],
     column_config=EDITOR_COLUMNS,
@@ -944,6 +1065,10 @@ if st.button("Ejecutar simulacion Monte Carlo", type="primary"):
             iterations=int(iterations),
             sigma=float(sigma),
             seed=int(seed_value) or None,
+            distance=distance or None,
+            bias_speed=bias_speed,
+            bias_rail=bias_rail,
+            weights=weights,
         )
     except ValueError as exc:
         st.error(str(exc))
@@ -961,6 +1086,8 @@ if st.button("Ejecutar simulacion Monte Carlo", type="primary"):
                 "surface": surface,
                 "distance": distance or None,
                 "track_condition": track_condition,
+                "bias_speed": bias_speed,
+                "bias_rail": bias_rail,
                 "source_filename": st.session_state.get("source_filename"),
             },
         }
@@ -1007,6 +1134,9 @@ if saved:
         "Es una herramienta analitica; las apuestas conllevan riesgo de perdida."
     )
 
+    with st.expander("Datos leidos y calidad de la informacion", expanded=False):
+        st.caption("Verifica que el sistema leyo bien el DRF. 'No disponible' significa que el dato no estaba en el material; nunca se inventa.")
+        st.dataframe(data_quality_table(results), hide_index=True)
     with st.expander("Tabla detallada con todos los ajustes"):
         st.dataframe(style_results(build_results_table(results)), hide_index=True)
 
@@ -1020,7 +1150,7 @@ if saved:
             "race_name": race_info["race_name"],
             "records": [
                 {key: record.get(key) for key in (
-                    "program_number", "name", "morning_line", "win_probability", "implied_probability",
+                    "program_number", "name", "morning_line", "win_probability", "implied_probability", "verdict",
                 )}
                 for record in records
             ],
@@ -1175,5 +1305,75 @@ if pick_result and pick_races:
         "las apuestas conllevan riesgo de perdida.</div>",
         unsafe_allow_html=True,
     )
+
+# ---------------------------------------------------------------------------
+# 07 Resultados reales y desempeno
+# ---------------------------------------------------------------------------
+step_header(
+    "07", "Resultados reales y desempeño",
+    "Registra como termino la carrera para medir cuanto acierta el sistema",
+)
+saved_race_id = st.session_state.get("saved_race_id")
+if not db_ok:
+    st.caption("Necesita la base de datos configurada (revisa el archivo .env).")
+else:
+    if not saved_race_id:
+        st.caption("Guarda el analisis en el paso 05 para poder registrar el resultado real de esa carrera.")
+    else:
+        with st.expander("Registrar el resultado de la carrera guardada", expanded=False):
+            r1, r2, r3, r4 = st.columns(4)
+            with r1:
+                first_place = st.text_input("1.o (numero)", key="w_res_1").strip()
+            with r2:
+                second_place = st.text_input("2.o", key="w_res_2").strip()
+            with r3:
+                third_place = st.text_input("3.o", key="w_res_3").strip()
+            with r4:
+                fourth_place = st.text_input("4.o", key="w_res_4").strip()
+            st.session_state.setdefault("w_res_payout", 0.0)
+            win_payout = st.number_input("Pago a ganador por $2 (opcional)", min_value=0.0, step=0.1, key="w_res_payout")
+            if st.button("Guardar resultado real"):
+                try:
+                    db.save_race_result(
+                        saved_race_id, [first_place, second_place, third_place, fourth_place], win_payout or None
+                    )
+                except db.DatabaseError as exc:
+                    st.error(str(exc))
+                else:
+                    st.success("Resultado guardado.")
+    with st.expander("Desempeño del sistema (backtesting)", expanded=False):
+        if st.button("Calcular desempeño", key="run_backtest"):
+            try:
+                st.session_state["backtest"] = bt.compute_backtest(db.get_backtest_rows())
+            except db.DatabaseError as exc:
+                st.session_state.pop("backtest", None)
+                st.error(str(exc))
+        stats = st.session_state.get("backtest")
+        if stats is not None:
+            if stats["races"] == 0:
+                st.info("Todavia no hay carreras con resultado real y simulacion guardada.")
+            else:
+                n = stats["races"]
+                if not stats["reliable"]:
+                    st.warning(f"Solo hay {n} carrera(s) con resultado. Con menos de {bt.MIN_RACES_RELIABLE} los porcentajes "
+                               "son muy inestables: no ajustes los pesos con esta muestra.")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Carreras medidas", n)
+                m2.metric("Favorito del modelo gana", f"{stats['top_win'] / n:.0%}")
+                m3.metric("Favorito en el top 3", f"{stats['top_top3'] / n:.0%}")
+                f1, f2, f3 = st.columns(3)
+                f1.metric("FIJOS acertados", f"{stats['fijo_wins']} de {stats['fijo_count']}")
+                f2.metric("TIRAR que ganaron", f"{stats['tirar_wins']} de {stats['tirar_count']}")
+                f3.metric("ROI de FIJOS ($2 a ganador)", f"{stats['fijo_roi']:+.0%}" if stats["fijo_roi"] is not None else "n/d")
+                st.caption(f"Brier: {stats['brier']:.3f} (menor es mejor) · "
+                           + (f"Log-loss: {stats['log_loss']:.3f}" if stats["log_loss"] is not None else ""))
+                if stats["calibration"]:
+                    st.markdown('<div class="sub-h">Calibracion: probabilidad predicha vs. frecuencia real</div>', unsafe_allow_html=True)
+                    st.dataframe(
+                        pd.DataFrame(stats["calibration"]).rename(
+                            columns={"range": "Rango", "count": "Caballos", "predicted": "Prob. predicha", "actual": "Gano en realidad"}
+                        ).style.format({"Prob. predicha": "{:.1%}", "Gano en realidad": "{:.1%}"}),
+                        hide_index=True,
+                    )
 
 persist_session(edited_df)
