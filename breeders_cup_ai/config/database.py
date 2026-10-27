@@ -13,13 +13,14 @@ import pandas as pd
 from dotenv import load_dotenv
 from supabase import Client, create_client
 
-from services.simulator import ADJUSTMENT_COLUMNS, parse_morning_line
+from services.simulator import ADJUSTMENT_COLUMNS, PROFILE_FIELDS, parse_morning_line
 
 load_dotenv()
 
 RACES_TABLE = "races"
 HORSES_TABLE = "horses"
 RESULTS_TABLE = "simulation_results"
+RACE_RESULTS_TABLE = "race_results"
 
 # Listas blancas: solo estas columnas se envian a la base de datos.
 RACE_COLUMNS = (
@@ -39,7 +40,6 @@ HORSE_COLUMNS = (
     "base_speed_figure",
     "foreign_origin",
     "foreign_level",
-    "dirt_debut",
     "form_trend",
     "class_rating",
     "jockey",
@@ -107,11 +107,21 @@ def _pick(source: dict[str, Any], columns: Iterable[str]) -> dict[str, Any]:
     return {column: _clean(source.get(column)) for column in columns}
 
 
+MIGRATION_HINT = (
+    " Falta actualizar la base de datos: ejecuta el archivo migration_v2.sql en Supabase "
+    "(SQL Editor > New query > Run)."
+)
+
+
 def _execute(builder: Any, action: str) -> list[dict[str, Any]]:
     try:
         response = builder.execute()
     except Exception as exc:  # noqa: BLE001
-        raise DatabaseError(f"Supabase fallo al {action}: {exc}") from exc
+        text = str(exc)
+        hint = MIGRATION_HINT if any(
+            marker in text for marker in ("PGRST204", "PGRST205", "does not exist", "schema cache", "42703", "42P01")
+        ) else ""
+        raise DatabaseError(f"Supabase fallo al {action}: {exc}.{hint}") from exc
     return list(response.data or [])
 
 
@@ -147,6 +157,7 @@ def save_horses(race_id: str, horses: list[dict[str, Any]]) -> list[str]:
         row["id"] = str(uuid.uuid4())
         row["race_id"] = race_id
         row["morning_line_decimal"] = parse_morning_line(horse.get("morning_line"))
+        row["profile"] = {field: _clean(horse.get(field)) for field in PROFILE_FIELDS}
         rows.append(row)
     _execute(get_client().table(HORSES_TABLE).insert(rows), "guardar los caballos")
     return [row["id"] for row in rows]
@@ -186,6 +197,9 @@ def save_simulation_results(
                 "is_positive_ev": bool(record.get("is_positive_ev", False)),
                 "iterations": int(iterations),
                 "sigma": float(sigma),
+                "verdict": _clean(record.get("verdict")),
+                "confidence": _clean(record.get("confidence")),
+                "confidence_level": _clean(record.get("confidence_level")),
             }
         )
     _execute(get_client().table(RESULTS_TABLE).insert(rows), "guardar los resultados")
@@ -230,8 +244,10 @@ def list_races(limit: int = 50) -> list[dict[str, Any]]:
 
 
 def get_horses(race_id: str) -> list[dict[str, Any]]:
+    """Caballos de una carrera, con el perfil (jsonb) ya mezclado en cada fila."""
     builder = get_client().table(HORSES_TABLE).select("*").eq("race_id", race_id).order("created_at")
-    return _execute(builder, "leer los caballos")
+    rows = _execute(builder, "leer los caballos")
+    return [{**{k: v for k, v in row.items() if k != "profile"}, **(row.get("profile") or {})} for row in rows]
 
 
 def get_latest_results(race_id: str) -> list[dict[str, Any]]:
@@ -259,3 +275,83 @@ def get_latest_results(race_id: str) -> list[dict[str, Any]]:
 def delete_race(race_id: str) -> None:
     """Elimina una carrera; sus caballos y resultados se borran en cascada."""
     _execute(get_client().table(RACES_TABLE).delete().eq("id", race_id), "eliminar la carrera")
+
+
+# ---------------------------------------------------------------------------
+# Resultados reales y backtesting
+# ---------------------------------------------------------------------------
+def save_race_result(race_id: str, finish: list[str], win_payout: float | None = None) -> None:
+    """Guarda (o reemplaza) el orden de llegada real: numeros de programa del 1.o al 4.o."""
+    places = [str(p).strip() for p in finish if str(p).strip()]
+    if not places:
+        raise DatabaseError("Indica al menos el numero del ganador.")
+    if len(set(places)) != len(places):
+        raise DatabaseError("Hay numeros de programa repetidos en el orden de llegada.")
+    row = {
+        "race_id": race_id,
+        "first": places[0],
+        "second": places[1] if len(places) > 1 else None,
+        "third": places[2] if len(places) > 2 else None,
+        "fourth": places[3] if len(places) > 3 else None,
+        "win_payout": _clean(win_payout) if win_payout else None,
+    }
+    _execute(get_client().table(RACE_RESULTS_TABLE).upsert(row, on_conflict="race_id"), "guardar el resultado real")
+
+
+def list_race_results(limit: int = 500) -> list[dict[str, Any]]:
+    builder = get_client().table(RACE_RESULTS_TABLE).select("*").order("created_at", desc=True).limit(limit)
+    return _execute(builder, "leer los resultados reales")
+
+
+def get_backtest_rows() -> list[dict[str, Any]]:
+    """Una fila por carrera con resultado real: orden de llegada y la ultima simulacion guardada.
+
+    Cada fila: {race_id, race_name, finish: [...], win_payout, horses: [{program_number, win_probability,
+    verdict, decimal_odds}]}.
+    """
+    results = list_race_results()
+    if not results:
+        return []
+    race_ids = [r["race_id"] for r in results]
+    client = get_client()
+    races = {r["id"]: r for r in _execute(client.table(RACES_TABLE).select("id,race_name,race_number").in_("id", race_ids), "leer las carreras")}
+    horses = _execute(client.table(HORSES_TABLE).select("id,race_id,program_number").in_("race_id", race_ids), "leer los caballos")
+    program = {h["id"]: h["program_number"] for h in horses}
+    sims = _execute(
+        client.table(RESULTS_TABLE)
+        .select("race_id,run_id,horse_id,win_probability,verdict,decimal_odds,created_at")
+        .in_("race_id", race_ids),
+        "leer las simulaciones",
+    )
+    latest: dict[str, tuple[str, str]] = {}
+    for row in sims:  # simulacion mas reciente de cada carrera
+        current = latest.get(row["race_id"])
+        if current is None or row["created_at"] > current[0]:
+            latest[row["race_id"]] = (row["created_at"], row["run_id"])
+
+    rows = []
+    for result in results:
+        race_id = result["race_id"]
+        if race_id not in latest:
+            continue
+        run_id = latest[race_id][1]
+        entries = [
+            {
+                "program_number": program.get(s["horse_id"], "?"),
+                "win_probability": float(s["win_probability"]),
+                "verdict": s.get("verdict"),
+                "decimal_odds": s.get("decimal_odds"),
+            }
+            for s in sims
+            if s["race_id"] == race_id and s["run_id"] == run_id
+        ]
+        rows.append(
+            {
+                "race_id": race_id,
+                "race_name": races.get(race_id, {}).get("race_name", ""),
+                "finish": [p for p in (result["first"], result.get("second"), result.get("third"), result.get("fourth")) if p],
+                "win_payout": float(result["win_payout"]) if result.get("win_payout") else None,
+                "horses": entries,
+            }
+        )
+    return rows
