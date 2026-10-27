@@ -16,11 +16,15 @@ from pypdf import PdfReader, PdfWriter
 from pypdf.errors import PdfReadError
 
 from services.simulator import (
+    BLINKERS_CHANGES,
     CLASS_RATINGS,
+    FIT_LEVELS,
     FOREIGN_LEVELS,
     FOREIGN_ORIGINS,
     FORM_TRENDS,
+    GOING_PREFS,
     JOCKEY_SWITCHES,
+    RATING_KINDS,
     RUNNING_STYLES,
     SURFACES,
     TRACK_APTITUDES,
@@ -45,78 +49,115 @@ class ExtractionError(RuntimeError):
     """Error controlado durante la extraccion del PDF."""
 
 
-SYSTEM_PROMPT = f"""Eres un analista experto en handicapping de carreras de caballos de pura sangre \
-(Breeders' Cup, Keeneland, Del Mar) y lees Past Performances de Daily Racing Form y Brisnet, \
+_PROMPT_TEMPLATE = """Eres un analista experto en handicapping de carreras de caballos de pura sangre \
+(Breeders' Cup, Keeneland en arena y grama) y lees Past Performances de Daily Racing Form (DRF), \
 ya sea en PDF o en fotos y capturas de pantalla.
-Tu unica salida es UN objeto JSON valido. Sin texto antes o despues, sin markdown, sin comentarios. \
-Devuelvelo minificado: sin saltos de linea ni indentacion y sin repetir informacion.
-Nunca inventes datos: si algo no aparece en el PDF y no puede deducirse, usa null (o el valor por \
-defecto indicado). Los nombres de claves y los valores de catalogo deben coincidir EXACTAMENTE.
+Tu unica salida es UN objeto JSON valido, minificado, sin texto antes o despues, sin markdown, sin comentarios.
+
+FUENTE: usa UNICAMENTE el material adjunto. No uses conocimiento externo ni datos que no esten en el \
+documento. Si un dato no aparece o no se lee con claridad, usa null (o el valor por defecto indicado). \
+Nunca inventes ni estimes cifras. Los nombres de claves y los valores de catalogo deben coincidir EXACTAMENTE.
+MORNING LINE: es un dato aparte. NO lo uses para calificar al caballo: la forma, la clase, la aptitud, el \
+estilo y el pedigri se deducen solo de sus carreras y estadisticas, nunca de si es el favorito.
 
 ESTRUCTURA DE SALIDA:
-{{
-  "race": {{
-    "race_name": string|null,
-    "race_number": integer|null,
-    "track": string|null,
-    "race_date": "YYYY-MM-DD"|null,
-    "surface": one of {list(SURFACES)}|null,
-    "distance": string|null
-  }},
+{
+  "race": {"race_name": string|null, "race_number": integer|null, "track": string|null,
+           "race_date": "YYYY-MM-DD"|null, "surface": one of @SURFACES@|null, "distance": string|null},
   "horses": [
-    {{
-      "program_number": string,
-      "name": string,
-      "morning_line": string|null,
-      "base_speed_figure": number|null,
-      "foreign_origin": one of {list(FOREIGN_ORIGINS)},
-      "foreign_level": one of {list(FOREIGN_LEVELS)},
-      "dirt_debut": boolean,
-      "form_trend": one of {list(FORM_TRENDS)},
-      "class_rating": one of {list(CLASS_RATINGS)},
-      "jockey": string|null,
-      "is_regular_jockey": boolean,
-      "jockey_switch": one of {list(JOCKEY_SWITCHES)},
-      "track_aptitude": one of {list(TRACK_APTITUDES)},
-      "mud_proven": boolean,
-      "running_style": one of {list(RUNNING_STYLES)},
-      "weight_lbs": number|null,
-      "last_weight_lbs": number|null,
-      "scratched": boolean
-    }}
+    {
+      "program_number": string, "name": string, "morning_line": string|null,
+      "figures": [{"v": number, "s": "D"|"T"|"S"|null, "d": number|null}],
+      "intl_ratings": [{"v": number, "s": "D"|"T"|"S"|null, "d": number|null}],
+      "intl_rating_kind": one of @RATING_KINDS@,
+      "foreign_origin": one of @FOREIGN_ORIGINS@, "foreign_level": one of @FOREIGN_LEVELS@,
+      "form_trend": one of @FORM_TRENDS@, "class_rating": one of @CLASS_RATINGS@, "earnings_per_start": number|null,
+      "running_style": one of @RUNNING_STYLES@, "quirin_points": number|null,
+      "jockey": string|null, "is_regular_jockey": boolean, "jockey_switch": one of @JOCKEY_SWITCHES@,
+      "jockey_win_pct": number|null,
+      "trainer": string|null, "trainer_win_pct": number|null, "trainer_situation_pct": number|null,
+      "combo_win_pct": number|null,
+      "sire": string|null, "dam_sire": string|null,
+      "ped_surface_fit": one of @FIT_LEVELS@, "ped_distance_fit": one of @FIT_LEVELS@,
+      "ped_wet_fit": one of @FIT_LEVELS@,
+      "track_aptitude": one of @TRACK_APTITUDES@, "mud_proven": boolean, "going_pref": one of @GOING_PREFS@,
+      "dirt_starts": integer|null, "dirt_wins": integer|null, "turf_starts": integer|null, "turf_wins": integer|null,
+      "dist_starts": integer|null, "dist_wins": integer|null, "wet_starts": integer|null, "wet_wins": integer|null,
+      "days_since_last": integer|null, "starts_90d": integer|null,
+      "workouts_30d": integer|null, "bullet_work": boolean,
+      "blinkers_change": one of @BLINKERS_CHANGES@, "lasix_first": boolean,
+      "post_position": integer|null, "trouble_last": boolean, "first_us_start": boolean,
+      "weight_lbs": number|null, "last_weight_lbs": number|null, "scratched": boolean
+    }
   ]
-}}
+}
 
 DEFINICION DE CADA CAMPO:
-- program_number / name / jockey: tal como aparecen en el programa. Incluye todos los caballos, \
-tambien los marcados como scratched o also-eligible (marca scratched=true los retirados).
-- morning_line: linea matutina en formato fraccion, p. ej. "5/2", "9-2", "even". Si no aparece, null.
-- base_speed_figure: figura de velocidad en escala 0-120. Usa Beyer; si no hay, Brisnet Speed Rating; \
-si solo hay Timeform/RPR, conviertela de forma conservadora a la escala Beyer. Usa el promedio de las \
-2 mejores figuras de las ultimas 3 salidas. Si no hay ninguna, null.
-- foreign_origin: "Europe" o "Japan" si su ultima salida o su base de campana es en Europa/Japon; \
-si no, "None".
-- foreign_level: nivel de su mejor resultado reciente en el extranjero: "G1_Winner" (gano un Grupo 1/G1), \
-"G1_Placed" (2do o 3ro en un G1), "Other" (cualquier otro nivel). "None" si foreign_origin es "None".
-- dirt_debut: true si el caballo nunca ha corrido en pista de arena (dirt).
-- form_trend: analiza las ultimas 3 salidas. "Ascending" = figuras/posiciones mejorando; "Plateau" = \
-estable; "Descending" = empeorando.
-- class_rating: "G1_Winner" = ha ganado un Grado 1; "Graded_Placed" = ha sido colocado en stakes \
-graduados o corre en su nivel; "Class_Riser" = sube claramente de categoria o de nivel.
-- is_regular_jockey: true si monta el jinete que lo montó en la mayoria de sus ultimas salidas.
-- jockey_switch: "Upgrade" si cambia a un jinete claramente mejor (p. ej. I. Ortiz Jr., F. Prat, \
-R. Moore, W. Buick); "Downgrade" si cambia a uno claramente inferior; "Neutral" en los demas casos \
-(incluido el jinete habitual).
-- track_aptitude: rendimiento historico en este hipodromo/trazado: "Proven_Winner" (ha ganado aqui), \
-"Positive" (buenos resultados, sin victoria), "Negative" (malos resultados aqui), "First_Time" (nunca \
-ha corrido aqui).
-- mud_proven: true si tiene victorias o actuaciones fuertes comprobadas en pista fangosa/pesada/suave.
-- running_style: "E" = puntero (Early speed), "P" = presser/perseguidor, "S" = sustained/rematador \
-(closer). Deducelo de los simbolos de estilo (E, E/P, P, S) y de los parciales de sus carreras.
-- weight_lbs: peso asignado en esta carrera (libras). last_weight_lbs: peso en su ultima salida.
+- program_number / name / jockey / trainer / sire / dam_sire: tal como aparecen en el programa. Incluye todos \
+los caballos, tambien los scratched o also-eligible (scratched=true los retirados).
+- morning_line: linea matutina en fraccion, p. ej. "5/2", "9-2", "even". Si no aparece, null.
+- figures: TODAS las Beyer Speed Figures que muestre el DRF de sus carreras anteriores (hasta 10), de la MAS \
+RECIENTE a la mas antigua, no solo la ultima. v = la figura; s = superficie de esa carrera ("D" arena, "T" grama, \
+"S" sintetica); d = distancia en furlongs (1 milla = 8; 1 1/16 millas = 8.5; 1 1/8 = 9). Omite s o d \
+(null) si no se leen. Una carrera sin figura no se incluye. Sin Beyers, [].
+- intl_ratings / intl_rating_kind: los caballos que corrieron en Europa, Japon u otro pais y traen un rating \
+(Timeform, RPR u otro) en vez de Beyer: sus ratings, con el mismo formato y orden que figures \
+(v = el rating), y el tipo ("Timeform", "RPR", "Other"). Si no hay rating, [] y "None".
+- foreign_origin: "Europe" o "Japan" si su ultima salida o su base de campana es en Europa/Japon; si no, "None". \
+foreign_level: nivel de su mejor resultado reciente en el extranjero: "G1_Winner", "G1_Placed" (2do o 3ro en un \
+G1), "Other". "None" si foreign_origin es "None".
+- form_trend: analiza sus ultimas carreras (figuras y posiciones de llegada). "Ascending" = mejorando; \
+"Plateau" = estable; "Descending" = empeorando.
+- class_rating: "G1_Winner" = ha ganado un Grado 1; "Graded_Placed" = ha sido colocado en stakes graduados o \
+corre en su nivel; "Class_Riser" = sube claramente de categoria. earnings_per_start: ganancias totales divididas \
+entre sus salidas, en dolares, si el DRF las trae.
+- running_style: "E" = puntero, "P" = presser/perseguidor, "S" = rematador (closer), segun el simbolo de estilo \
+del DRF (E, E/P, P, S). quirin_points: los puntos de velocidad temprana (Quirin) de 0 a 8 si aparecen.
+- jockey_switch: "Upgrade" si cambia a un jinete claramente mejor; "Downgrade" si a uno claramente inferior; \
+"Neutral" en los demas casos. is_regular_jockey: true si monta quien lo monto en la mayoria de sus ultimas salidas. \
+jockey_win_pct: porcentaje de victorias del jinete segun el DRF (numero, p. ej. 18 para 18%).
+- trainer_win_pct: porcentaje de victorias del entrenador segun el DRF. trainer_situation_pct: porcentaje del \
+entrenador en la situacion de este caballo que muestre el DRF (primera salida, tras descanso, grama, 2 anos...). \
+combo_win_pct: porcentaje de la dupla jinete-entrenador si aparece.
+- ped_surface_fit / ped_distance_fit / ped_wet_fit: adecuacion del pedigri (padre y abuelo materno) a LA \
+SUPERFICIE, LA DISTANCIA y al terreno HUMEDO de hoy, segun las estadisticas de pedigri del DRF. "Strong" si son \
+buenas, "Weak" si son malas, "Neutral" si son normales, "Unknown" si el DRF no trae esas estadisticas.
+- track_aptitude: rendimiento en este hipodromo segun su record: "Proven_Winner" (ha ganado aqui), "Positive" \
+(buenos resultados sin victoria), "Negative" (malos resultados), "First_Time" (nunca ha corrido aqui).
+- mud_proven: true si tiene victorias o actuaciones fuertes en pista humeda/suave/pesada. going_pref: terreno que \
+prefiere segun sus resultados: "Firm", "Soft", "Any" o "Unknown".
+- dirt_/turf_/dist_/wet_ starts y wins: sus records (salidas y victorias) en arena, grama, a la distancia de hoy \
+y en pista humeda, tal como los muestra el DRF.
+- days_since_last: dias entre su ultima carrera y la fecha de hoy. starts_90d: salidas en los ultimos 90 dias.
+- workouts_30d: numero de trabajos (works) de los ultimos 30 dias. bullet_work: true si algun trabajo reciente \
+esta marcado como el mejor del dia (bullet).
+- blinkers_change: "First_Time" si usa blinkers por primera vez, "Off" si se los quita, "None" en los demas \
+casos. lasix_first: true si corre con Lasix por primera vez.
+- post_position: puesto de salida. trouble_last: true si el comentario de su ultima carrera indica problemas \
+(cerrado, abierto, golpeado, tropezo, frenado).
+- first_us_start: true si es su primera carrera en EE.UU.
+- weight_lbs: peso asignado en esta carrera. last_weight_lbs: peso en su ultima salida.
 
-REGLAS: no agregues claves extra; numeros como numeros (no strings); booleanos como true/false; \
-conserva el orden del programa."""
+REGLAS: no agregues claves extra; numeros como numeros (no strings); booleanos como true/false; conserva el \
+orden del programa."""
+
+_PROMPT_CATALOGS = {
+    "@SURFACES@": SURFACES,
+    "@RATING_KINDS@": RATING_KINDS,
+    "@FOREIGN_ORIGINS@": FOREIGN_ORIGINS,
+    "@FOREIGN_LEVELS@": FOREIGN_LEVELS,
+    "@FORM_TRENDS@": FORM_TRENDS,
+    "@CLASS_RATINGS@": CLASS_RATINGS,
+    "@RUNNING_STYLES@": RUNNING_STYLES,
+    "@JOCKEY_SWITCHES@": JOCKEY_SWITCHES,
+    "@FIT_LEVELS@": FIT_LEVELS,
+    "@TRACK_APTITUDES@": TRACK_APTITUDES,
+    "@GOING_PREFS@": GOING_PREFS,
+    "@BLINKERS_CHANGES@": BLINKERS_CHANGES,
+}
+SYSTEM_PROMPT = _PROMPT_TEMPLATE
+for _token, _options in _PROMPT_CATALOGS.items():
+    SYSTEM_PROMPT = SYSTEM_PROMPT.replace(_token, str(list(_options)))
 
 
 def _open_pdf(pdf_bytes: bytes) -> PdfReader:
@@ -309,6 +350,7 @@ def extract_race_data_from_files(
     race_hint: str | None = None,
     track: str | None = None,
     pages: str | None = None,
+    conditions: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Envia PDFs y/o imagenes a Claude y devuelve {"race": {...}, "horses": [...]}.
 
@@ -318,6 +360,8 @@ def extract_race_data_from_files(
         race_hint: nombre/numero de la carrera a extraer si el material trae varias.
         track: hipodromo (para evaluar la aptitud a la pista), p. ej. "Keeneland".
         pages: paginas a enviar de un PDF, p. ej. "12-19". Solo se puede usar con un unico PDF.
+        conditions: condiciones de la carrera de hoy (surface, distance, track_condition, race_date) para
+            que el pedigri, el descanso y las distancias se evaluen contra ellas.
 
     Raises:
         ExtractionError: archivo invalido, falta la API key, error de API o JSON no parseable.
@@ -386,6 +430,15 @@ def extract_race_data_from_files(
         )
     if track:
         instructions.append(f"Hipodromo de la carrera: {track} (usalo para evaluar track_aptitude).")
+    if conditions:
+        labels = (("surface", "superficie"), ("distance", "distancia"), ("track_condition", "condicion de pista"),
+                  ("race_date", "fecha"))
+        today = ", ".join(f"{label} {conditions[key]}" for key, label in labels if conditions.get(key))
+        if today:
+            instructions.append(
+                f"Condiciones de la carrera de HOY: {today}. Evalua el pedigri, las distancias, el descanso y la "
+                "aptitud contra estas condiciones."
+            )
     if race_hint:
         instructions.append(f"Si el material contiene varias carreras, extrae SOLO esta: {race_hint}.")
     instructions.append("Responde unicamente con el objeto JSON.")
@@ -442,8 +495,9 @@ def extract_race_data_from_pdf(
     race_hint: str | None = None,
     track: str | None = None,
     pages: str | None = None,
+    conditions: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Compatibilidad: extrae los datos de un unico PDF (o imagen) ya en memoria."""
     return extract_race_data_from_files(
-        [("documento", pdf_bytes)], race_hint=race_hint, track=track, pages=pages
+        [("documento", pdf_bytes)], race_hint=race_hint, track=track, pages=pages, conditions=conditions
     )
