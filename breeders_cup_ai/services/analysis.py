@@ -13,14 +13,23 @@ STYLE_NAMES = {"E": "velocista", "P": "perseguidor", "S": "sostenido (corre atra
 
 # (columna de ajuste, frase si suma, frase si resta)
 FACTOR_PHRASES = {
-    "adj_foreign": ("viene de Europa/Japon con nivel de grupo y la superficie lo favorece", "su debut en arena le resta"),
+    "adj_foreign": ("viene del exterior con nivel de grupo y la superficie lo favorece", "su primera salida en EE.UU. le resta"),
     "adj_form": ("llega en forma ascendente", "su forma viene en descenso"),
-    "adj_class": ("es ganador de G1", "sube de nivel de lote"),
+    "adj_class": ("sube su nivel de clase", "sube de nivel de lote"),
     "adj_jockey": ("tiene jinete de primer nivel", "cambia a un jinete de menor nivel"),
     "adj_track": ("tiene aptitud comprobada en la pista", "no rinde bien en esta pista"),
-    "adj_condition": ("la condicion humeda le favorece", ""),
+    "adj_condition": ("la condicion de la pista le favorece", "la condicion de la pista no le favorece"),
     "adj_pace": ("el ritmo esperado le favorece", "el ritmo esperado lo perjudica"),
     "adj_weight": ("", "carga mas peso que en su ultima salida"),
+    "adj_pedigree": ("su pedigri encaja con superficie y distancia", "su pedigri no encaja con la carrera"),
+    "adj_distance": ("sus mejores figuras salieron a esta distancia", "sus mejores figuras salieron a otra distancia"),
+    "adj_layoff": ("llega con descanso y actividad adecuados", "el descanso o la inactividad lo perjudican"),
+    "adj_trainer": ("el entrenador tiene buen record en esta situacion", "el entrenador rinde poco en esta situacion"),
+    "adj_workouts": ("sus trabajos recientes son buenos", "sus trabajos recientes son flojos"),
+    "adj_equipment": ("el cambio de equipo le favorece", "el equipo le resta"),
+    "adj_bias": ("el sesgo de la pista le favorece", "el sesgo de la pista lo perjudica"),
+    "adj_trip": ("tuvo problemas en su ultima y puede mejorar", "no se espera mejora de su viaje"),
+    "adj_surface": ("tiene antecedentes en esta superficie", "tiene poco o ningun antecedente en esta superficie"),
 }
 
 
@@ -39,7 +48,9 @@ def _standout(records: list[dict[str, Any]]) -> dict[str, Any] | None:
     first, second = records[0], records[1]
     win = first["win_probability"]
     ratio = win / second["win_probability"] if second["win_probability"] > 0 else float("inf")
-    if win >= DOMINANT_WIN and ratio >= DOMINANT_RATIO:
+    if first.get("verdict") == "FIJO":
+        level, title = "dominant", "FIJO del sistema"
+    elif win >= DOMINANT_WIN and ratio >= DOMINANT_RATIO and first.get("confidence_level") != "Baja":
         level, title = "dominant", "Caballo dominante"
     elif win >= SOLID_WIN and ratio >= SOLID_RATIO:
         level, title = "solid", "Favorito solido"
@@ -199,13 +210,16 @@ def build_analysis(
 
     # --- Alertas de calidad de datos y de valor --------------------------------------
     alerts: list[str] = []
-    missing_speed = [_label(r) for k, r in by_key.items() if _horse(horses, k).get("base_speed_figure") is None]
-    if missing_speed:
-        shown = ", ".join(missing_speed[:4]) + ("..." if len(missing_speed) > 4 else "")
+    low_conf = [_label(r) for r in records if r.get("confidence_level") == "Baja"]
+    if low_conf:
+        shown = ", ".join(low_conf[:4]) + ("..." if len(low_conf) > 4 else "")
         alerts.append(
-            f"{len(missing_speed)} caballo(s) no traen speed figure ({shown}). Se les asigno el promedio del campo; "
-            "completa el dato para que el resultado sea mas confiable."
+            f"{len(low_conf)} caballo(s) con confianza Baja por datos faltantes en el DRF ({shown}). "
+            "Nunca reciben veredicto FIJO; revisa la tabla de datos leidos."
         )
+    no_fig = [_label(r) for r in records if not r.get("n_figures")]
+    if no_fig:
+        alerts.append(f"Sin figuras ni ratings: {', '.join(no_fig[:4])}. Se les asigno el promedio del campo.")
     missing_ml = [_label(r) for r in records if not r["morning_line"]]
     if missing_ml:
         alerts.append(f"Sin Morning Line: {', '.join(missing_ml[:4])}. No se puede calcular su EV.")
@@ -224,12 +238,10 @@ def build_analysis(
             alerts.append(
                 f"Mejor valor: {_label(best)} con ML {best['morning_line']} y EV {best['expected_value']:+.0%}."
             )
-    if race.get("surface") == "Turf" and any(
-        _horse(horses, k).get("foreign_origin") == "Europe" for k in by_key
-    ):
+    if any(_horse(horses, k).get("foreign_origin") not in (None, "", "None", "USA") for k in by_key):
         alerts.append(
-            "Hay europeos en pasto: el modelo les suma bonus por origen. Si el campo es mayormente europeo, "
-            "ese bonus no los diferencia entre si; fijate en forma, jinete y speed figure."
+            "Hay caballos del exterior: se evaluan con su rating internacional convertido a escala Beyer "
+            "(factor editable en Pesos del sistema). Esa conversion es una aproximacion."
         )
     descending = [_label(r) for k, r in by_key.items()
                   if _horse(horses, k).get("form_trend") == "Descending" and r["rank"] <= 4]
