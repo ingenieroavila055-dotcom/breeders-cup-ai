@@ -70,9 +70,18 @@ def build_leg(race_number: int, race_name: str, records: list[dict[str, Any]]) -
                 "model": model,
                 "market": market,
                 "ratio": ratio,
+                "verdict": record.get("verdict"),
             }
         )
     entries.sort(key=lambda e: e["model"], reverse=True)
+    fijos = [e for e in entries if e["verdict"] == "FIJO"]
+    if fijos:
+        entries = fijos[:1]  # el modelo lo ve fijo: pierna de un solo caballo
+    else:
+        kept = [e for e in entries if e["verdict"] != "TIRAR"]
+        if len(kept) < 3:  # evita piernas demasiado cortas
+            kept = entries[:3]
+        entries = kept
     return {"race_number": int(race_number), "race_name": race_name, "entries": entries}
 
 
