@@ -1003,6 +1003,8 @@ if extract_clicked:
             st.session_state["source_filename"] = ", ".join(name for name, _ in upload_files)[:250]
             info = extracted["race"]
             st.success(f"Se extrajeron {len(extracted['horses'])} caballos. Revisa y corrige la tabla.")
+            for warning in extracted.get("warnings", []):
+                st.warning(warning)
             detected = [f"{k}: {v}" for k, v in info.items() if v]
             if detected:
                 st.caption("Datos detectados en el material (manda tu configuracion): " + " · ".join(detected))
