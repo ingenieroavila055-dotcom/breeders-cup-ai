@@ -138,6 +138,9 @@ casos. lasix_first: true si corre con Lasix por primera vez.
 - first_us_start: true si es su primera carrera en EE.UU.
 - weight_lbs: peso asignado en esta carrera. last_weight_lbs: peso en su ultima salida.
 
+AHORRO DE TOKENS (muy importante): OMITE toda clave cuyo valor sea null, false, [], "None" o "Unknown". \
+Solo escribe las claves con un dato real. Siempre incluye program_number y name de cada caballo.
+
 REGLAS: no agregues claves extra; numeros como numeros (no strings); booleanos como true/false; conserva el \
 orden del programa."""
 
@@ -244,6 +247,62 @@ def _parse_json(text: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("El JSON de la respuesta no es un objeto.")
     return data
+
+
+def _split_objects(text: str, start: int) -> list[str]:
+    """Objetos {...} completos de nivel 1 dentro de una lista que empieza en `start` (tolera cortes)."""
+    objects, depth, in_str, escape, begin = [], 0, False, False, None
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                begin = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and begin is not None:
+                objects.append(text[begin : i + 1])
+                begin = None
+            elif depth < 0:
+                break
+        elif ch == "]" and depth == 0:
+            break
+    return objects
+
+
+def _salvage(text: str) -> dict[str, Any] | None:
+    """Recupera los caballos completos de una respuesta cortada o con JSON roto en alguna parte."""
+    marker = re.search(r'"horses"\s*:\s*\[', text)
+    if not marker:
+        return None
+    horses = []
+    for chunk in _split_objects(text, marker.end()):
+        try:
+            item = json.loads(chunk)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict) and item.get("name"):
+            horses.append(item)
+    if not horses:
+        return None
+    race: dict[str, Any] = {}
+    race_match = re.search(r'"race"\s*:\s*(\{[^{}]*\})', text[: marker.start()])
+    if race_match:
+        try:
+            race = json.loads(race_match.group(1))
+        except json.JSONDecodeError:
+            race = {}
+    return {"race": race, "horses": horses}
 
 
 def _normalize_result(data: dict[str, Any]) -> dict[str, Any]:
@@ -477,17 +536,31 @@ def extract_race_data_from_files(
             raise ExtractionError(f"Error de la API de Anthropic: {exc}") from exc
 
         text = "".join(block.text for block in response.content if getattr(block, "type", "") == "text")
-        if response.stop_reason == "max_tokens":
-            last_error = ValueError(
-                "La respuesta se corto por limite de tokens. Indica solo las paginas de la carrera o usa fotos mas claras."
-            )
-            continue
-        try:
-            return _normalize_result(_parse_json(text))
-        except (ValueError, json.JSONDecodeError) as exc:
-            last_error = exc
-
-    raise ExtractionError(f"No se pudo obtener un JSON valido tras {MAX_ATTEMPTS} intentos: {last_error}")
+        truncated = response.stop_reason == "max_tokens"
+        if not truncated:
+            try:
+                return _normalize_result(_parse_json(text))
+            except (ValueError, json.JSONDecodeError) as exc:
+                last_error = exc
+        else:
+            last_error = ValueError("La respuesta se corto por limite de tokens.")
+        # Rescata los caballos completos en vez de perder lo ya pagado.
+        recovered = _salvage(text)
+        if recovered is not None:
+            try:
+                result = _normalize_result(recovered)
+            except ValueError as exc:
+                last_error = exc
+            else:
+                result["warnings"] = [
+                    f"La respuesta llego incompleta o con un error de formato; se recuperaron {len(result['horses'])} "
+                    "caballo(s). Compara con el programa y agrega los que falten en la tabla."
+                ]
+                return result
+    sample = (text or "")[:300].replace("\n", " ")
+    raise ExtractionError(
+        f"No se pudo obtener un JSON valido: {last_error}. Inicio de la respuesta: {sample!r}"
+    )
 
 
 def extract_race_data_from_pdf(
