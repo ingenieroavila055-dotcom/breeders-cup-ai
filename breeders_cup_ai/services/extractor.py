@@ -100,25 +100,51 @@ los caballos, tambien los scratched o also-eligible (scratched=true los retirado
 RECIENTE a la mas antigua, no solo la ultima. v = la figura; s = superficie de esa carrera ("D" arena, "T" grama, \
 "S" sintetica); d = distancia en furlongs (1 milla = 8; 1 1/16 millas = 8.5; 1 1/8 = 9). Omite s o d \
 (null) si no se leen. Una carrera sin figura no se incluye. Sin Beyers, [].
-- intl_ratings / intl_rating_kind: los caballos que corrieron en Europa, Japon u otro pais y traen un rating \
-(Timeform, RPR u otro) en vez de Beyer: sus ratings, con el mismo formato y orden que figures \
-(v = el rating), y el tipo ("Timeform", "RPR", "Other"). Si no hay rating, [] y "None".
-- foreign_origin: "Europe" o "Japan" si su ultima salida o su base de campana es en Europa/Japon; si no, "None". \
-foreign_level: nivel de su mejor resultado reciente en el extranjero: "G1_Winner", "G1_Placed" (2do o 3ro en un \
-G1), "Other". "None" si foreign_origin es "None".
+- intl_ratings / intl_rating_kind: los caballos que corrieron fuera de EE.UU. (Europa, Japon, Hong Kong, Arabia, \
+Emiratos, Australia...) traen en el DRF una linea "Timeform Rating: N" debajo de cada carrera extranjera: ese N \
+es el rating de esa carrera. Extraelo en intl_ratings, de la carrera MAS RECIENTE a la mas antigua, con v = N, \
+s = superficie de esa carrera y d = distancia en furlongs. Superficie: las condiciones de pista gf/gd/gs/sf/yl/hy/fm \
+y los hipodromos europeos suelen ser grama ("T"); ft/sy/fs en pistas de arena = "D"; Meydan y Sha Tin pueden ser \
+arena o grama segun el simbolo de superficie y el nombre de la carrera. Distancia: "5f" = 5, "6f" = 6, "7f" = 7, \
+"1" = 1 milla = 8, "1 1/4" = 10. intl_rating_kind = "Timeform" cuando viene como "Timeform Rating"; "RPR" u "Other" \
+si es otro. Si el caballo tambien tiene Beyers de carreras en EE.UU., esos van en figures y los de afuera en \
+intl_ratings. Si no hay rating, [] y "None". No conviertas ni ajustes el rating: copialo tal cual.
+- foreign_origin: segun el pais de sus carreras recientes y de su base: "Europe" (GB, Irlanda, Francia, Alemania, \
+Italia...), "Japan", "Other" (Hong Kong, Australia, Emiratos, Arabia Saudi, Sudamerica...) o "None" si corre en \
+EE.UU. first_us_start = true si nunca ha corrido en EE.UU. (sus carreras son todas de fuera). foreign_level: \
+mejor resultado reciente en el extranjero: "G1_Winner" (gano un Grupo/Grado 1, aparece como -G1), "G1_Placed" \
+(2do o 3ro en un G1), "Other" para el resto de casos. "None" si foreign_origin es "None". Para estos caballos \
+tambien llena track_aptitude="First_Time" si nunca corrio en Keeneland, y going_pref segun el terreno de sus \
+mejores ratings (gf/fm = "Firm"; gd/gs/sf/yl/hy = "Soft"; "Any" si rinde igual en ambos).
 - form_trend: analiza sus ultimas carreras (figuras y posiciones de llegada). "Ascending" = mejorando; \
 "Plateau" = estable; "Descending" = empeorando.
 - class_rating: "G1_Winner" = ha ganado un Grado 1; "Graded_Placed" = ha sido colocado en stakes graduados o \
 corre en su nivel; "Class_Riser" = sube claramente de categoria. earnings_per_start: ganancias totales divididas \
 entre sus salidas, en dolares, si el DRF las trae.
 - running_style: "E" = puntero, "P" = presser/perseguidor, "S" = rematador (closer), segun el simbolo de estilo \
-del DRF (E, E/P, P, S). quirin_points: los puntos de velocidad temprana (Quirin) de 0 a 8 si aparecen.
+del DRF (E, E/P, P, S). Si el DRF no trae simbolo sino "TimeformUS Pace: Early X Late Y", compara a los caballos \
+del campo: "E" si su Early es de los mas altos y supera claramente su Late; "S" si su Late supera a su Early o su \
+Early es de los mas bajos; "P" en los demas. quirin_points: los puntos de velocidad temprana (Quirin) de 0 a 8 \
+solo si aparecen; si el DRF no los trae, null (no conviertas el Early de TimeformUS a Quirin).
 - jockey_switch: "Upgrade" si cambia a un jinete claramente mejor; "Downgrade" si a uno claramente inferior; \
 "Neutral" en los demas casos. is_regular_jockey: true si monta quien lo monto en la mayoria de sus ultimas salidas. \
 jockey_win_pct: porcentaje de victorias del jinete segun el DRF (numero, p. ej. 18 para 18%).
 - trainer_win_pct: porcentaje de victorias del entrenador segun el DRF. trainer_situation_pct: porcentaje del \
 entrenador en la situacion de este caballo que muestre el DRF (primera salida, tras descanso, grama, 2 anos...). \
 combo_win_pct: porcentaje de la dupla jinete-entrenador si aparece.
+- Recuadro de records del DRF: las filas "D.Fst / Wet / Synth / Turf / Dst" muestran "Nombre(N) salidas \
+1os 2os 3os ganancias": N entre parentesis es el rating de pedigri de esa condicion (mas alto = mejor) y las \
+cuatro cifras siguientes son salidas, victorias, segundos y terceros. Usa esas salidas y victorias para \
+dirt_/turf_/wet_/dist_ starts y wins (D.Fst = arena, Dst = distancia de hoy). Los ratings N sirven para ped_*_fit: \
+compara con los demas caballos del campo; "Strong" si esta claramente entre los mas altos, "Weak" si entre los \
+mas bajos, "Neutral" en el medio; un asterisco o N ausente = "Unknown".
+- Estadisticas con parentesis: jinete/entrenador "2026: (1148 285 .25)" = salidas, victorias, proporcion: \
+jockey_win_pct / trainer_win_pct = proporcion x 100 (.25 -> 25). En la linea TRAINER, cada categoria \
+"Nombre(salidas proporcion ROI)" es una situacion: trainer_situation_pct = la proporcion x 100 de la categoria \
+que coincide con este caballo (p. ej. Mdn2ndStart si es su 2.a salida, 2YO, Turf/Dirt segun hoy). \
+combo_win_pct = proporcion x 100 de "J/T 2025-26" (la dupla de esta carrera).
+- La figura Beyer de cada carrera anterior es el numero que aparece justo despues del tipo y bolsa de la carrera \
+(p. ej. "Md Sp Wt 110k 65"), antes de las posiciones de llegada. Una carrera sin figura no se incluye.
 - ped_surface_fit / ped_distance_fit / ped_wet_fit: adecuacion del pedigri (padre y abuelo materno) a LA \
 SUPERFICIE, LA DISTANCIA y al terreno HUMEDO de hoy, segun las estadisticas de pedigri del DRF. "Strong" si son \
 buenas, "Weak" si son malas, "Neutral" si son normales, "Unknown" si el DRF no trae esas estadisticas.
@@ -182,6 +208,46 @@ def _open_pdf(pdf_bytes: bytes) -> PdfReader:
 def count_pdf_pages(pdf_bytes: bytes) -> int:
     """Numero de paginas de un PDF (lanza ExtractionError si no se puede leer)."""
     return len(_open_pdf(pdf_bytes).pages)
+
+
+def detect_race_pages(pdf_bytes: bytes) -> dict[int, list[int]]:
+    """Paginas de cada carrera de un PDF de jornada completa: {numero_de_carrera: [paginas base 1]}.
+
+    Usa el pie de pagina del DRF ("Kee, race 3, page:2"). Devuelve {} si no se detecta.
+    """
+    import logging
+
+    logging.getLogger("pypdf").setLevel(logging.ERROR)
+    try:
+        reader = _open_pdf(pdf_bytes)
+        races: dict[int, list[int]] = {}
+        for number, page in enumerate(reader.pages, start=1):
+            try:
+                text = page.extract_text() or ""
+            except Exception:  # noqa: BLE001 - una pagina ilegible no debe romper la deteccion
+                continue
+            match = re.search(r"race\s*(\d{1,2})\s*,\s*page\s*:\s*\d+", text, flags=re.IGNORECASE)
+            if match:
+                races.setdefault(int(match.group(1)), []).append(number)
+        return races
+    except ExtractionError:
+        return {}
+
+
+def pages_to_spec(pages: list[int]) -> str:
+    """[12, 13, 14, 17] -> '12-14,17'."""
+    parts, start, previous = [], None, None
+    for page in sorted(pages):
+        if start is None:
+            start = previous = page
+        elif page == previous + 1:
+            previous = page
+        else:
+            parts.append(f"{start}-{previous}" if previous != start else str(start))
+            start = previous = page
+    if start is not None:
+        parts.append(f"{start}-{previous}" if previous != start else str(start))
+    return ",".join(parts)
 
 
 def parse_page_ranges(spec: str, total_pages: int) -> list[int]:
@@ -505,6 +571,7 @@ def extract_race_data_from_files(
 
     client = anthropic.Anthropic(api_key=api_key)
     last_error: Exception | None = None
+    usage = {"input": 0, "output": 0}
 
     thinking_off = True  # evita que el razonamiento interno consuma el limite de tokens de salida
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -535,11 +602,15 @@ def extract_race_data_from_files(
         except anthropic.APIError as exc:
             raise ExtractionError(f"Error de la API de Anthropic: {exc}") from exc
 
+        usage["input"] += int(getattr(getattr(response, "usage", None), "input_tokens", 0) or 0)
+        usage["output"] += int(getattr(getattr(response, "usage", None), "output_tokens", 0) or 0)
         text = "".join(block.text for block in response.content if getattr(block, "type", "") == "text")
         truncated = response.stop_reason == "max_tokens"
         if not truncated:
             try:
-                return _normalize_result(_parse_json(text))
+                result = _normalize_result(_parse_json(text))
+                result["usage"] = usage
+                return result
             except (ValueError, json.JSONDecodeError) as exc:
                 last_error = exc
         else:
@@ -552,6 +623,7 @@ def extract_race_data_from_files(
             except ValueError as exc:
                 last_error = exc
             else:
+                result["usage"] = usage
                 result["warnings"] = [
                     f"La respuesta llego incompleta o con un error de formato; se recuperaron {len(result['horses'])} "
                     "caballo(s). Compara con el programa y agrega los que falten en la tabla."
