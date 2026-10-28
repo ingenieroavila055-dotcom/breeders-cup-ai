@@ -32,7 +32,7 @@ SURFACES = ("Dirt", "Turf", "Synthetic")
 TRACK_CONDITIONS = ("Fast", "Firm", "Good", "Yielding", "Soft", "Muddy", "Sloppy", "Heavy")
 WET_CONDITIONS = frozenset({"Yielding", "Soft", "Muddy", "Sloppy", "Heavy"})
 
-FOREIGN_ORIGINS = ("None", "Europe", "Japan")
+FOREIGN_ORIGINS = ("None", "Europe", "Japan", "Other")
 FOREIGN_LEVELS = ("None", "G1_Winner", "G1_Placed", "Other")
 FORM_TRENDS = ("Ascending", "Plateau", "Descending")
 CLASS_RATINGS = ("G1_Winner", "Graded_Placed", "Class_Riser")
@@ -576,7 +576,7 @@ def compute_adjustments(
     raw = {column: 0.0 for column in ADJUSTMENT_COLUMNS}
 
     # Extranjero (Europa / Japon): bonus en grama segun su nivel; sin castigo en arena.
-    if horse["foreign_origin"] in {"Europe", "Japan"} and surface == "Turf":
+    if horse["foreign_origin"] in {"Europe", "Japan", "Other"} and surface == "Turf":
         raw["adj_foreign"] = FOREIGN_LEVEL_POINTS.get(horse["foreign_level"], FOREIGN_LEVEL_POINTS["Other"])
 
     # Forma: la tendencia calculada de las figuras manda; si no hay, la declarada.
