@@ -29,6 +29,7 @@ FACTOR_PHRASES = {
     "adj_equipment": ("el cambio de equipo le favorece", "el equipo le resta"),
     "adj_bias": ("el sesgo de la pista le favorece", "el sesgo de la pista lo perjudica"),
     "adj_trip": ("tuvo problemas en su ultima y puede mejorar", "no se espera mejora de su viaje"),
+    "adj_intuition": ("el criterio experto lo ve mejor que lo que dicen los numeros", "el criterio experto lo ve peor que lo que dicen los numeros"),
     "adj_surface": ("tiene antecedentes en esta superficie", "tiene poco o ningun antecedente en esta superficie"),
 }
 
@@ -94,42 +95,112 @@ def _label(record: dict[str, Any]) -> str:
     return f"#{record['program_number']} {record['name']}"
 
 
-def _pace_scenario(table: pd.DataFrame, horses: list[dict[str, Any]]) -> dict[str, Any]:
-    keys = [int(k) for k in table["horse_key"]]
-    by_key = {int(r["horse_key"]): r for r in table.to_dict("records")}
-    styles = {k: _horse(horses, k).get("running_style", "P") for k in keys}
-    speed = [by_key[k] for k in keys if styles[k] == "E"]
-    closers = [by_key[k] for k in keys if styles[k] == "S"]
-    speed_names = ", ".join(_label(r) for r in speed)
-    closer_names = ", ".join(_label(r) for r in closers[:3])
+def _early_text(horse: dict[str, Any]) -> str:
+    early, late = horse.get("early_pace"), horse.get("late_pace")
+    if early is None:
+        return ""
+    return f" (Early {early:g}" + (f", Late {late:g})" if late is not None else ")")
 
-    if not speed:
-        title = "Sin velocidad clara"
-        text = (
-            "Ningun caballo esta marcado como velocista, asi que se espera un ritmo lento y sin pelea por "
-            "la punta. En ese escenario ganan terreno los que corren cerca de la punta (perseguidores) y "
-            "les cuesta mas a los que vienen de atras."
+
+def _names(keys: list[int], by_key: dict[int, dict[str, Any]], horses: list[dict[str, Any]], limit: int = 4) -> str:
+    items = [_label(by_key[k]) + _early_text(_horse(horses, k)) for k in keys if k in by_key][:limit]
+    return ", ".join(items)
+
+
+def _pace_scenario(table: pd.DataFrame, horses: list[dict[str, Any]]) -> dict[str, Any]:
+    """Planteamiento de carrera a partir de la proyeccion de ritmo de la simulacion."""
+    pace = table.attrs.get("pace")
+    by_key = {int(r["horse_key"]): r for r in table.to_dict("records")}
+    if not pace:
+        return {"title": "Sin proyeccion de ritmo", "text": "No hay datos de ritmo para esta carrera.", "early_count": 0}
+
+    leaders, stalkers, closers = pace["leaders"], pace["stalkers"], pace["closers"]
+    sprint, route = pace["sprint"], pace["route"]
+    source = "Se clasifica a cada caballo comparando su TimeformUS Early/Late con el resto del campo." \
+        if pace["uses_pace_numbers"] else "Los estilos salen de los puntos Quirin o del estilo declarado en el DRF."
+    lead_names = _names(leaders, by_key, horses)
+    parts = []
+    key = pace["scenario"]
+    if key == "slow":
+        parts.append(
+            "Ningun caballo tiene velocidad temprana clara, asi que se proyecta una carrera lenta y tactica. "
+            "Los que corren cerca de la punta (perseguidores) tienen ventaja y a los rematadores les cuesta "
+            "recuperar terreno si nadie acelera."
         )
-    elif len(speed) == 1:
-        title = "Punta sin oposicion"
-        text = (
-            f"{speed_names} es el unico velocista y puede mandar la carrera con parciales comodos. "
-            "Un velocista solo es una ventaja grande: si nadie lo presiona, es dificil de alcanzar."
+    elif key == "lone":
+        parts.append(
+            f"{lead_names} es el unico con velocidad real y puede dominar la carrera con parciales comodos. "
+            "Un puntero solo es dificil de alcanzar: la ventaja es grande si nadie lo presiona."
         )
-    elif len(speed) == 2:
-        title = "Duelo moderado por la punta"
-        text = (
-            f"Hay dos velocistas ({speed_names}). Se espera un ritmo vivo pero sostenible; "
-            "el primero en tomar la delantera tiene ligera ventaja y los perseguidores quedan bien ubicados."
+    elif key == "honest":
+        parts.append(
+            f"Dos caballos con velocidad ({lead_names}) se repartiran la punta en un ritmo vivo pero sostenible. "
+            "El que tome la delantera con facilidad queda favorecido y los perseguidores quedan bien ubicados."
         )
     else:
-        title = "Punta muy disputada"
-        text = (
-            f"Hay {len(speed)} velocistas ({speed_names}) que van a pelear por la punta. "
-            "Es probable un ritmo rapido que desgasta a los de adelante y favorece a los que vienen de atras"
-            + (f" ({closer_names})." if closers else ".")
+        parts.append(
+            f"Hay {len(leaders)} caballos con velocidad ({lead_names}) que van a pelear por la punta. Se proyecta un "
+            "ritmo rapido que desgasta a los de adelante y favorece a los que vienen de atras."
         )
-    return {"title": title, "text": text, "early_count": len(speed)}
+    if stalkers:
+        parts.append(f"Perseguidores (acechan en 2.o-4.o lugar): {_names(stalkers, by_key, horses)}.")
+    if closers:
+        parts.append(f"Rematadores (vienen de atras): {_names(closers, by_key, horses)}.")
+    if sprint:
+        parts.append("En una distancia corta la velocidad se sostiene mas y los rematadores tienen poco espacio para remontar.")
+    elif route:
+        parts.append("En una distancia larga hay mas tiempo para remontar, por lo que el ritmo pesa mas sobre los que van adelante.")
+
+    benefit = sorted(
+        (r for r in by_key.values() if (r.get("adj_pace") or 0) >= 1.0 and r["rank"] <= 5),
+        key=lambda r: r["adj_pace"], reverse=True,
+    )
+    hurt = sorted(
+        (r for r in by_key.values() if (r.get("adj_pace") or 0) <= -1.0 and r["rank"] <= 5),
+        key=lambda r: r["adj_pace"],
+    )
+    if benefit:
+        parts.append("Se benefician del ritmo: " + ", ".join(f"{_label(r)} ({r['adj_pace']:+.1f})" for r in benefit[:3]) + ".")
+    if hurt:
+        parts.append("Los perjudica el ritmo: " + ", ".join(f"{_label(r)} ({r['adj_pace']:+.1f})" for r in hurt[:3]) + ".")
+    parts.append(source)
+    return {"title": pace["title"], "text": " ".join(parts), "early_count": len(leaders)}
+
+
+def _thesis(records: list[dict[str, Any]], horses: list[dict[str, Any]], pace: dict[str, Any]) -> list[str]:
+    """Conclusion razonada: por que gana el mejor, quien lo amenaza y que se descarta."""
+    lines: list[str] = []
+    top = records[0]
+    reasons = _key_factors(top, limit=3)
+    base = top.get("base_speed_figure")
+    base_text = f"base de {base:.0f} puntos (de sus figuras)" if base else "sin figuras suficientes"
+    because = "; ".join(reasons) if reasons else "sin factores de ajuste destacados"
+    lines.append(
+        f"Conclusion: el modelo ubica primero a {_label(top)} ({top['win_probability']:.0%}) con {base_text}. "
+        f"A su favor: {because}. Veredicto {top.get('verdict', '')}, confianza {top.get('confidence_level', 'n/d')}."
+    )
+    if len(records) > 1:
+        rival = records[1]
+        rival_reasons = _key_factors(rival, limit=2)
+        extra = f" ({'; '.join(rival_reasons)})" if rival_reasons else ""
+        lines.append(
+            f"Principal amenaza: {_label(rival)} con {rival['win_probability']:.0%}{extra}. "
+            f"Diferencia con el primero: {top['win_probability'] - rival['win_probability']:.0%} de probabilidad."
+        )
+    dropped = [r for r in records if r.get("verdict") == "TIRAR" and r.get("decimal_odds") and r["decimal_odds"] <= 5.0]
+    if dropped:
+        lines.append(
+            "Descartados aunque el mercado los respete: "
+            + "; ".join(f"{_label(r)} (ML {r['morning_line']}, modelo {r['win_probability']:.0%})" for r in dropped[:3])
+            + ". El Morning Line no entra en la calificacion; salen por su base y por el ritmo."
+        )
+    low = [r for r in records[:4] if r.get("confidence_level") == "Baja"]
+    if low:
+        lines.append(
+            "Cuidado: " + ", ".join(_label(r) for r in low) +
+            " tiene poca informacion en el DRF, asi que su probabilidad es menos fiable."
+        )
+    return lines
 
 
 def _key_factors(record: dict[str, Any], limit: int = 2) -> list[str]:
@@ -207,6 +278,7 @@ def build_analysis(
     ]
 
     pace = _pace_scenario(table, horses)
+    summary.extend(_thesis(records, horses, pace))
 
     # --- Alertas de calidad de datos y de valor --------------------------------------
     alerts: list[str] = []
