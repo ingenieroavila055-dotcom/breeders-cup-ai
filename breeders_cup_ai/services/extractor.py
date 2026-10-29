@@ -67,8 +67,7 @@ ESTRUCTURA DE SALIDA:
   "horses": [
     {
       "program_number": string, "name": string, "morning_line": string|null,
-      "figures": [{"v": number, "s": "D"|"T"|"S"|null, "d": number|null}],
-      "intl_ratings": [{"v": number, "s": "D"|"T"|"S"|null, "d": number|null}],
+      "figures": string|null, "intl_ratings": string|null,
       "intl_rating_kind": one of @RATING_KINDS@,
       "foreign_origin": one of @FOREIGN_ORIGINS@, "foreign_level": one of @FOREIGN_LEVELS@,
       "form_trend": one of @FORM_TRENDS@, "class_rating": one of @CLASS_RATINGS@, "earnings_per_start": number|null,
@@ -98,19 +97,19 @@ DEFINICION DE CADA CAMPO:
 - program_number / name / jockey / trainer / sire / dam_sire: tal como aparecen en el programa. Incluye todos \
 los caballos, tambien los scratched o also-eligible (scratched=true los retirados).
 - morning_line: linea matutina en fraccion, p. ej. "5/2", "9-2", "even". Si no aparece, null.
-- figures: TODAS las Beyer Speed Figures que muestre el DRF de sus carreras anteriores (hasta 10), de la MAS \
-RECIENTE a la mas antigua, no solo la ultima. v = la figura; s = superficie de esa carrera ("D" arena, "T" grama, \
-"S" sintetica); d = distancia en furlongs (1 milla = 8; 1 1/16 millas = 8.5; 1 1/8 = 9). Omite s o d \
-(null) si no se leen. Una carrera sin figura no se incluye. Sin Beyers, [].
+- figures: las Beyer Speed Figures de sus carreras anteriores (hasta 8), de la MAS RECIENTE a la mas antigua, \
+en UNA sola cadena de texto "figura superficie distancia" separadas por punto y coma, p. ej. "92 T 8; 88 D 8.5; 95". \
+superficie: D arena, T grama, S sintetica; distancia en furlongs (1 milla = 8; 1 1/16 millas = 8.5; 1 1/8 = 9). \
+Omite superficie o distancia si no se leen. Una carrera sin figura no se incluye. Sin Beyers, null.
 - intl_ratings / intl_rating_kind: los caballos que corrieron fuera de EE.UU. (Europa, Japon, Hong Kong, Arabia, \
 Emiratos, Australia...) traen en el DRF una linea "Timeform Rating: N" debajo de cada carrera extranjera: ese N \
-es el rating de esa carrera. Extraelo en intl_ratings, de la carrera MAS RECIENTE a la mas antigua, con v = N, \
-s = superficie de esa carrera y d = distancia en furlongs. Superficie: las condiciones de pista gf/gd/gs/sf/yl/hy/fm \
+es el rating de esa carrera. Extraelo en intl_ratings (hasta 8), de la carrera MAS RECIENTE a la mas antigua, en una cadena de texto con el \
+mismo formato que figures: "N superficie distancia; ...", p. ej. "122 T 5; 118 T 6". Superficie: las condiciones de pista gf/gd/gs/sf/yl/hy/fm \
 y los hipodromos europeos suelen ser grama ("T"); ft/sy/fs en pistas de arena = "D"; Meydan y Sha Tin pueden ser \
 arena o grama segun el simbolo de superficie y el nombre de la carrera. Distancia: "5f" = 5, "6f" = 6, "7f" = 7, \
 "1" = 1 milla = 8, "1 1/4" = 10. intl_rating_kind = "Timeform" cuando viene como "Timeform Rating"; "RPR" u "Other" \
 si es otro. Si el caballo tambien tiene Beyers de carreras en EE.UU., esos van en figures y los de afuera en \
-intl_ratings. Si no hay rating, [] y "None". No conviertas ni ajustes el rating: copialo tal cual.
+intl_ratings. Si no hay rating, null y "None". No conviertas ni ajustes el rating: copialo tal cual.
 - foreign_origin: segun el pais de sus carreras recientes y de su base: "Europe" (GB, Irlanda, Francia, Alemania, \
 Italia...), "Japan", "Other" (Hong Kong, Australia, Emiratos, Arabia Saudi, Sudamerica...) o "None" si corre en \
 EE.UU. first_us_start = true si nunca ha corrido en EE.UU. (sus carreras son todas de fuera). foreign_level: \
@@ -581,10 +580,58 @@ def extract_race_data_from_files(
     prompt = "\n".join(instructions)
 
     client = anthropic.Anthropic(api_key=api_key)
-    last_error: Exception | None = None
     usage = {"input": 0, "output": 0}
+    thinking_off = [True]  # evita que el razonamiento interno consuma el limite de tokens de salida
+    # El material se cachea: las llamadas de continuacion lo leen a una fraccion del costo.
+    cached_content = content[:-1] + [{**content[-1], "cache_control": {"type": "ephemeral"}}]
 
-    thinking_off = True  # evita que el razonamiento interno consuma el limite de tokens de salida
+    def call(user_text: str) -> tuple[str, bool]:
+        request = {
+            "model": model,
+            "max_tokens": MAX_OUTPUT_TOKENS,
+            "system": SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": cached_content + [{"type": "text", "text": user_text}]}],
+        }
+        try:
+            if thinking_off[0]:
+                try:
+                    response = client.messages.create(thinking={"type": "disabled"}, **request)
+                except anthropic.BadRequestError as exc:
+                    if "thinking" not in str(exc).lower():
+                        raise
+                    thinking_off[0] = False  # el modelo no admite el parametro: se envia sin el
+                    response = client.messages.create(**request)
+            else:
+                response = client.messages.create(**request)
+        except anthropic.APIError as exc:
+            raise ExtractionError(f"Error de la API de Anthropic: {exc}") from exc
+        meter = getattr(response, "usage", None)
+        usage["input"] += int(getattr(meter, "input_tokens", 0) or 0)
+        usage["output"] += int(getattr(meter, "output_tokens", 0) or 0)
+        text = "".join(block.text for block in response.content if getattr(block, "type", "") == "text")
+        return text, response.stop_reason == "max_tokens"
+
+    def read(text: str, truncated: bool) -> tuple[dict[str, Any], list[dict[str, Any]], bool] | None:
+        """(race, horses, parcial) de una respuesta, rescatando lo posible si esta cortada o rota."""
+        if not truncated:
+            try:
+                data = _parse_json(text)
+                if isinstance(data.get("horses"), list) and data["horses"]:
+                    race = data.get("race") if isinstance(data.get("race"), dict) else {}
+                    return race, [h for h in data["horses"] if isinstance(h, dict)], False
+            except (ValueError, json.JSONDecodeError):
+                pass
+        salvaged = _salvage(text)
+        if salvaged is None:
+            return None
+        data, _skipped = salvaged
+        return data["race"], data["horses"], True
+
+    race_raw: dict[str, Any] = {}
+    horses_raw: list[dict[str, Any]] = []
+    partial = False
+    first_text = ""
+    last_error = "la respuesta no contiene caballos"
     for attempt in range(1, MAX_ATTEMPTS + 1):
         user_text = prompt
         if attempt > 1:
@@ -593,72 +640,49 @@ def extract_race_data_from_files(
                 "Devuelve SOLO el JSON minificado, en una sola linea, con un unico objeto por caballo "
                 "y sin ningun texto adicional."
             )
-        request = {
-            "model": model,
-            "max_tokens": MAX_OUTPUT_TOKENS,
-            "system": SYSTEM_PROMPT,
-            "messages": [{"role": "user", "content": content + [{"type": "text", "text": user_text}]}],
-        }
-        try:
-            if thinking_off:
-                try:
-                    response = client.messages.create(thinking={"type": "disabled"}, **request)
-                except anthropic.BadRequestError as exc:
-                    if "thinking" not in str(exc).lower():
-                        raise
-                    thinking_off = False  # el modelo no admite el parametro: se envia sin el
-                    response = client.messages.create(**request)
-            else:
-                response = client.messages.create(**request)
-        except anthropic.APIError as exc:
-            raise ExtractionError(f"Error de la API de Anthropic: {exc}") from exc
+        text, truncated = call(user_text)
+        first_text = first_text or text
+        parsed = read(text, truncated)
+        if parsed is not None:
+            race_raw, horses_raw, partial = parsed
+            break
+        last_error = "la respuesta se corto por limite de tokens" if truncated else "JSON invalido"
+        first_text = text
+    if not horses_raw:
+        sample = (first_text or "")[:300].replace("\n", " ")
+        raise ExtractionError(f"No se pudo obtener un JSON valido: {last_error}. Inicio de la respuesta: {sample!r}")
 
-        usage["input"] += int(getattr(getattr(response, "usage", None), "input_tokens", 0) or 0)
-        usage["output"] += int(getattr(getattr(response, "usage", None), "output_tokens", 0) or 0)
-        text = "".join(block.text for block in response.content if getattr(block, "type", "") == "text")
-        truncated = response.stop_reason == "max_tokens"
-        if not truncated:
-            try:
-                result = _normalize_result(_parse_json(text))
-                result["usage"] = usage
-                size = result.get("field_size")
-                if size and len(result["horses"]) < size:
-                    result["warnings"] = [
-                        f"Se leyeron {len(result['horses'])} de {size} caballos del programa. "
-                        "Revisa que las paginas elegidas cubran toda la carrera."
-                    ]
-                return result
-            except (ValueError, json.JSONDecodeError) as exc:
-                last_error = exc
-        else:
-            last_error = ValueError("La respuesta se corto por limite de tokens.")
-        # Rescata los caballos completos en vez de perder lo ya pagado.
-        salvaged = _salvage(text)
-        if salvaged is not None:
-            recovered, skipped = salvaged
-            try:
-                result = _normalize_result(recovered)
-            except ValueError as exc:
-                last_error = exc
-            else:
-                result["usage"] = usage
-                reason = (
-                    "la respuesta se corto por limite de tokens"
-                    if truncated
-                    else f"{skipped} caballo(s) vinieron con formato invalido y se omitieron"
-                    if skipped
-                    else "la respuesta tuvo un error de formato al final"
-                )
-                message = f"Lectura parcial: {reason}. Se recuperaron {len(result['horses'])} caballo(s)"
-                if result.get("field_size"):
-                    message += f" de {result['field_size']} que trae el programa"
-                result["warnings"] = [message + ". Compara con el programa y agrega los que falten, o vuelve a extraer."]
-                return result
+    # Si quedo incompleta, se piden solo los caballos que faltan (hasta 3 rondas).
+    for _ in range(3):
+        field_size = race_raw.get("field_size")
+        have = [str(h.get("program_number", "")).strip() for h in horses_raw]
+        if not partial or (isinstance(field_size, int) and len(have) >= field_size):
+            break
+        text, truncated = call(
+            prompt
+            + f"\nYa extraiste los caballos con numero de programa: {', '.join(have)}. Devuelve SOLO los caballos "
+            "que FALTAN de esta carrera, con el mismo formato (incluye race con field_size)."
+        )
+        more = read(text, truncated)
+        if more is None:
+            break
+        _, extra, partial = more
+        new = [h for h in extra if str(h.get("program_number", "")).strip() not in have]
+        if not new:
+            break
+        horses_raw = horses_raw + new
 
-    sample = (text or "")[:300].replace("\n", " ")
-    raise ExtractionError(
-        f"No se pudo obtener un JSON valido: {last_error}. Inicio de la respuesta: {sample!r}"
-    )
+    result = _normalize_result({"race": race_raw, "horses": horses_raw})
+    result["usage"] = usage
+    size = result.get("field_size")
+    if size and len(result["horses"]) < size:
+        result["warnings"] = [
+            f"Se leyeron {len(result['horses'])} de {size} caballos del programa. "
+            "Revisa que las paginas elegidas cubran toda la carrera o vuelve a extraer."
+        ]
+    if partial or result.get("warnings"):
+        result["debug"] = (first_text[:500] + " ... " + first_text[-300:]) if len(first_text) > 800 else first_text
+    return result
 
 
 def extract_race_data_from_pdf(
