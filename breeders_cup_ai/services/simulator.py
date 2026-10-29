@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from services import figures as fg
+from services import pace as pace_mod
 
 # ---------------------------------------------------------------------------
 # Constantes y catalogos
@@ -111,6 +112,7 @@ ADJUSTMENT_COLUMNS = (
     "adj_bias",
     "adj_trip",
     "adj_surface",
+    "adj_intuition",
 )
 
 ADJUSTMENT_LABELS = {
@@ -131,6 +133,7 @@ ADJUSTMENT_LABELS = {
     "adj_bias": "Sesgo/Posicion",
     "adj_trip": "Recorrido",
     "adj_surface": "Superficie",
+    "adj_intuition": "Criterio experto",
 }
 
 # Pesos del sistema (editables en la app): multiplican los puntos de cada factor.
@@ -154,6 +157,8 @@ FLOAT_FIELDS = {
     "jockey_win_pct": (0.0, 100.0),
     "combo_win_pct": (0.0, 100.0),
     "quirin_points": (0.0, 8.0),
+    "early_pace": (0.0, 130.0),
+    "late_pace": (0.0, 130.0),
     "earnings_per_start": (0.0, None),
 }
 INT_FIELDS = (
@@ -185,7 +190,7 @@ HORSE_FIELDS = (
     "program_number", "name", "morning_line",
     "figures", "intl_ratings", "intl_rating_kind", "base_speed_figure",
     "foreign_origin", "foreign_level", "form_trend", "class_rating", "earnings_per_start",
-    "running_style", "quirin_points",
+    "running_style", "quirin_points", "early_pace", "late_pace",
     "jockey", "is_regular_jockey", "jockey_switch", "jockey_win_pct",
     "trainer", "trainer_win_pct", "trainer_situation_pct", "combo_win_pct",
     "sire", "dam_sire", "ped_surface_fit", "ped_distance_fit", "ped_wet_fit",
@@ -700,6 +705,19 @@ def compute_adjustments(
     return {column: raw[column] * weights[column] for column in ADJUSTMENT_COLUMNS}
 
 
+INTUITION_LIMIT = 3.0  # el criterio experto puede mover un caballo como maximo +/- 3 puntos
+
+
+def _intuition_points(intuition: dict[str, float] | None, horse: dict[str, Any]) -> float:
+    if not intuition:
+        return 0.0
+    try:
+        value = float(intuition.get(str(horse["program_number"]), 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+    return max(-INTUITION_LIMIT, min(INTUITION_LIMIT, value))
+
+
 def horse_notes(horse: dict[str, Any], analysis: dict[str, Any]) -> list[str]:
     notes = []
     if analysis["n"] == 0:
@@ -712,6 +730,8 @@ def horse_notes(horse: dict[str, Any], analysis: dict[str, Any]) -> list[str]:
         notes.append(f"Tendencia calculada de las figuras: {analysis['trend']}")
     if horse["first_us_start"]:
         notes.append("Primera carrera en EE.UU.")
+    if horse.get("_pace_note"):
+        notes.append(horse["_pace_note"])
     if horse["intl_ratings"] and not fg.parse_figures(horse["figures"]):
         notes.append("Base a partir de rating internacional convertido a escala Beyer")
     return notes
@@ -832,6 +852,7 @@ def simulate_race(
     bias_speed: str = "Neutral",
     bias_rail: str = "Neutral",
     weights: dict[str, float] | None = None,
+    intuition: dict[str, float] | None = None,
 ) -> pd.DataFrame:
     """Ejecuta el handicap completo y la simulacion. Devuelve un DataFrame ordenado
     por probabilidad de ganar (descendente).
@@ -863,16 +884,26 @@ def simulate_race(
         "median_eps": earnings[len(earnings) // 2] if earnings else None,
     }
 
-    early_count = count_early_speed([h for _, h in active])
+    pace = pace_mod.project_pace(active, ctx["distance_f"], surface)
+    early_count = len(pace["leaders"])
     analyses = {index: analyze_horse(h, ctx) for index, h in active}
     known_bases = [a["base"] for a in analyses.values() if a["base"] is not None]
     fallback_base = float(np.mean(known_bases)) if known_bases else DEFAULT_BASE_FIGURE
+
+    style_names = {"E": "puntero", "P": "perseguidor", "S": "rematador"}
+    for index, horse in active:
+        horse["_pace_note"] = (
+            f"Ritmo: corre de {style_names[pace['styles'][index]]} en una carrera de tipo "
+            f"'{pace['title'].lower()}' ({pace['adjust'][index]:+.1f})"
+        )
 
     rows: list[dict[str, Any]] = []
     factors: list[float] = []
     for index, horse in active:
         analysis = analyses[index]
         adjustments = compute_adjustments(horse, ctx, analysis, early_count)
+        adjustments["adj_pace"] = pace["adjust"][index] * resolved["adj_pace"]
+        adjustments["adj_intuition"] = _intuition_points(intuition, horse) * resolved["adj_intuition"]
         base = analysis["base"] if analysis["base"] is not None else fallback_base
         score, level, missing = compute_confidence(horse, analysis)
         factor = sigma_factor(analysis, level)
@@ -934,5 +965,6 @@ def simulate_race(
         ([int(horse_keys[i]) for i in members], frequency) for members, frequency in finish["combos"]
     ]
     result.attrs["early_count"] = int(early_count)
+    result.attrs["pace"] = pace
     result.attrs["distance_f"] = ctx["distance_f"]
     return result
