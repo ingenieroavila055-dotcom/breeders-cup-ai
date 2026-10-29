@@ -63,7 +63,7 @@ estilo y el pedigri se deducen solo de sus carreras y estadisticas, nunca de si 
 ESTRUCTURA DE SALIDA:
 {
   "race": {"race_name": string|null, "race_number": integer|null, "track": string|null,
-           "race_date": "YYYY-MM-DD"|null, "surface": one of @SURFACES@|null, "distance": string|null},
+           "race_date": "YYYY-MM-DD"|null, "field_size": integer|null, "surface": one of @SURFACES@|null, "distance": string|null},
   "horses": [
     {
       "program_number": string, "name": string, "morning_line": string|null,
@@ -73,6 +73,7 @@ ESTRUCTURA DE SALIDA:
       "foreign_origin": one of @FOREIGN_ORIGINS@, "foreign_level": one of @FOREIGN_LEVELS@,
       "form_trend": one of @FORM_TRENDS@, "class_rating": one of @CLASS_RATINGS@, "earnings_per_start": number|null,
       "running_style": one of @RUNNING_STYLES@, "quirin_points": number|null,
+      "early_pace": number|null, "late_pace": number|null,
       "jockey": string|null, "is_regular_jockey": boolean, "jockey_switch": one of @JOCKEY_SWITCHES@,
       "jockey_win_pct": number|null,
       "trainer": string|null, "trainer_win_pct": number|null, "trainer_situation_pct": number|null,
@@ -93,6 +94,7 @@ ESTRUCTURA DE SALIDA:
 }
 
 DEFINICION DE CADA CAMPO:
+- race.field_size: cuantos caballos aparecen en el programa de esta carrera (incluye retirados y also-eligible).
 - program_number / name / jockey / trainer / sire / dam_sire: tal como aparecen en el programa. Incluye todos \
 los caballos, tambien los scratched o also-eligible (scratched=true los retirados).
 - morning_line: linea matutina en fraccion, p. ej. "5/2", "9-2", "even". Si no aparece, null.
@@ -125,7 +127,8 @@ entre sus salidas, en dolares, si el DRF las trae.
 del DRF (E, E/P, P, S). Si el DRF no trae simbolo sino "TimeformUS Pace: Early X Late Y", compara a los caballos \
 del campo: "E" si su Early es de los mas altos y supera claramente su Late; "S" si su Late supera a su Early o su \
 Early es de los mas bajos; "P" en los demas. quirin_points: los puntos de velocidad temprana (Quirin) de 0 a 8 \
-solo si aparecen; si el DRF no los trae, null (no conviertas el Early de TimeformUS a Quirin).
+solo si aparecen; si el DRF no los trae, null (no conviertas el Early de TimeformUS a Quirin). early_pace y \
+late_pace: los numeros de "TimeformUS Pace: Early X Late Y" del caballo (X e Y), tal cual; null si no aparecen.
 - jockey_switch: "Upgrade" si cambia a un jinete claramente mejor; "Downgrade" si a uno claramente inferior; \
 "Neutral" en los demas casos. is_regular_jockey: true si monta quien lo monto en la mayoria de sus ultimas salidas. \
 jockey_win_pct: porcentaje de victorias del jinete segun el DRF (numero, p. ej. 18 para 18%).
@@ -346,19 +349,23 @@ def _split_objects(text: str, start: int) -> list[str]:
     return objects
 
 
-def _salvage(text: str) -> dict[str, Any] | None:
+def _salvage(text: str) -> tuple[dict[str, Any], int] | None:
     """Recupera los caballos completos de una respuesta cortada o con JSON roto en alguna parte."""
     marker = re.search(r'"horses"\s*:\s*\[', text)
     if not marker:
         return None
     horses = []
+    skipped = 0
     for chunk in _split_objects(text, marker.end()):
         try:
             item = json.loads(chunk)
         except json.JSONDecodeError:
+            skipped += 1
             continue
         if isinstance(item, dict) and item.get("name"):
             horses.append(item)
+        else:
+            skipped += 1
     if not horses:
         return None
     race: dict[str, Any] = {}
@@ -368,7 +375,7 @@ def _salvage(text: str) -> dict[str, Any] | None:
             race = json.loads(race_match.group(1))
         except json.JSONDecodeError:
             race = {}
-    return {"race": race, "horses": horses}
+    return {"race": race, "horses": horses}, skipped
 
 
 def _normalize_result(data: dict[str, Any]) -> dict[str, Any]:
@@ -396,7 +403,11 @@ def _normalize_result(data: dict[str, Any]) -> dict[str, Any]:
     horses = [h for h in horses if h["name"]]
     if not horses:
         raise ValueError("Ningun caballo tiene nombre en el JSON devuelto.")
-    return {"race": race, "horses": horses}
+    try:
+        field_size = int(race_raw["field_size"]) if race_raw.get("field_size") is not None else None
+    except (TypeError, ValueError):
+        field_size = None
+    return {"race": race, "horses": horses, "field_size": field_size}
 
 
 def detect_file_kind(data: bytes) -> str:
@@ -610,25 +621,40 @@ def extract_race_data_from_files(
             try:
                 result = _normalize_result(_parse_json(text))
                 result["usage"] = usage
+                size = result.get("field_size")
+                if size and len(result["horses"]) < size:
+                    result["warnings"] = [
+                        f"Se leyeron {len(result['horses'])} de {size} caballos del programa. "
+                        "Revisa que las paginas elegidas cubran toda la carrera."
+                    ]
                 return result
             except (ValueError, json.JSONDecodeError) as exc:
                 last_error = exc
         else:
             last_error = ValueError("La respuesta se corto por limite de tokens.")
         # Rescata los caballos completos en vez de perder lo ya pagado.
-        recovered = _salvage(text)
-        if recovered is not None:
+        salvaged = _salvage(text)
+        if salvaged is not None:
+            recovered, skipped = salvaged
             try:
                 result = _normalize_result(recovered)
             except ValueError as exc:
                 last_error = exc
             else:
                 result["usage"] = usage
-                result["warnings"] = [
-                    f"La respuesta llego incompleta o con un error de formato; se recuperaron {len(result['horses'])} "
-                    "caballo(s). Compara con el programa y agrega los que falten en la tabla."
-                ]
+                reason = (
+                    "la respuesta se corto por limite de tokens"
+                    if truncated
+                    else f"{skipped} caballo(s) vinieron con formato invalido y se omitieron"
+                    if skipped
+                    else "la respuesta tuvo un error de formato al final"
+                )
+                message = f"Lectura parcial: {reason}. Se recuperaron {len(result['horses'])} caballo(s)"
+                if result.get("field_size"):
+                    message += f" de {result['field_size']} que trae el programa"
+                result["warnings"] = [message + ". Compara con el programa y agrega los que falten, o vuelve a extraer."]
                 return result
+
     sample = (text or "")[:300].replace("\n", " ")
     raise ExtractionError(
         f"No se pudo obtener un JSON valido: {last_error}. Inicio de la respuesta: {sample!r}"
