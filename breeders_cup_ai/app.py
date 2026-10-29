@@ -20,6 +20,7 @@ from config import database as db  # noqa: E402
 from services import simulator as sim  # noqa: E402
 from services import picks as pk  # noqa: E402
 from services import backtest as bt  # noqa: E402
+from services import expert as ex  # noqa: E402
 from services.analysis import build_analysis  # noqa: E402
 from services.extractor import (  # noqa: E402
     MAX_IMAGES,
@@ -27,7 +28,9 @@ from services.extractor import (  # noqa: E402
     ExtractionError,
     count_pdf_pages,
     detect_file_kind,
+    detect_race_pages,
     extract_race_data_from_files,
+    pages_to_spec,
 )
 
 APP_TITLE = "SISTEMA TYLER PARA BREEDERS CUP"
@@ -339,6 +342,8 @@ EDITOR_COLUMNS = {
     "earnings_per_start": _num("Ganancias/salida ($)", 0, None, 1000),
     "running_style": _pick("Estilo", sim.RUNNING_STYLES, width="small"),
     "quirin_points": _num("Quirin", 0, 8, 1, "Puntos de velocidad temprana (0-8) del DRF."),
+    "early_pace": _num("Pace Early", 0, 130, 1, "TimeformUS Pace Early del DRF."),
+    "late_pace": _num("Pace Late", 0, 130, 1, "TimeformUS Pace Late del DRF."),
     "jockey": _text("Jinete"),
     "is_regular_jockey": _check("Jinete habitual"),
     "jockey_switch": _pick("Cambio jinete", sim.JOCKEY_SWITCHES),
@@ -372,7 +377,7 @@ EDITOR_COLUMNS = {
     "scratched": _check("Retirado"),
 }
 COMPACT_COLUMNS = [
-    "program_number", "name", "morning_line", "figures", "intl_ratings", "running_style", "quirin_points",
+    "program_number", "name", "morning_line", "figures", "intl_ratings", "running_style", "early_pace", "late_pace",
     "form_trend", "class_rating", "jockey", "scratched",
 ]
 CHIP_LABELS = dict(sim.ADJUSTMENT_LABELS)
@@ -398,6 +403,7 @@ def set_horses(horses: list[dict]) -> None:
     st.session_state["horses_df"] = horses_to_dataframe(horses)
     st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
     st.session_state.pop("results", None)
+    st.session_state.pop("expert", None)
     st.session_state.pop("saved_race_id", None)
 
 
@@ -702,7 +708,7 @@ track = TRACK_NAME
 SESSION_STORE_MAX = 40
 PERSISTED_PREFIXES = ("w_", "name_", "distance_", "surface_", "cond_")
 PERSISTED_KEYS = (
-    "horses_df", "editor_version", "results", "source_filename", "saved_race_id", "pick_races", "pick_result",
+    "horses_df", "editor_version", "results", "expert", "source_filename", "saved_race_id", "pick_races", "pick_result",
 )
 
 
@@ -896,6 +902,11 @@ def cached_thumbnail(file_id: str, _data: bytes) -> bytes | None:
         return None
 
 
+@st.cache_data(show_spinner=False, max_entries=8)
+def cached_race_pages(file_id: str, _data: bytes) -> dict[int, list[int]]:
+    return detect_race_pages(_data)
+
+
 pdf_pages_spec = ""
 needs_page_range = False
 upload_blocked = False
@@ -950,15 +961,28 @@ if upload_files:
                 )
 
     if len(pdf_positions) == 1 and page_counts:
-        st.caption(
-            "Si el PDF trae toda la jornada, indica solo las páginas de la carrera que vas a analizar: "
-            "es más rápido, más barato y más preciso."
-        )
-        pdf_pages_spec = st.text_input(
-            "Páginas de esta carrera (opcional)",
-            placeholder="Ejemplo: 12-19",
-            help="Acepta rangos y listas: 12-19, o 3,7,10-12. Vacío = se envía el PDF completo.",
-        ).strip()
+        detected_races = cached_race_pages(uploaded_files[pdf_positions[0]].file_id, upload_files[pdf_positions[0]][1])
+        if len(detected_races) >= 2:
+            st.caption(
+                "El PDF trae varias carreras. Elige la que vas a analizar: se envian solo sus paginas "
+                "(mas rapido, mas barato y mas preciso)."
+            )
+            race_choices = {
+                f"Carrera {number} (paginas {pages_to_spec(pages)})": pages_to_spec(pages)
+                for number, pages in sorted(detected_races.items())
+            }
+            chosen = st.selectbox("Carrera del programa", list(race_choices), key="w_pdf_race")
+            pdf_pages_spec = race_choices[chosen]
+        else:
+            st.caption(
+                "Si el PDF trae toda la jornada, indica solo las páginas de la carrera que vas a analizar: "
+                "es más rápido, más barato y más preciso."
+            )
+            pdf_pages_spec = st.text_input(
+                "Páginas de esta carrera (opcional)",
+                placeholder="Ejemplo: 12-19",
+                help="Acepta rangos y listas: 12-19, o 3,7,10-12. Vacío = se envía el PDF completo.",
+            ).strip()
         needs_page_range = page_counts[0] > MAX_PDF_PAGES and not pdf_pages_spec
         if needs_page_range:
             st.warning(
@@ -1003,6 +1027,9 @@ if extract_clicked:
             st.session_state["source_filename"] = ", ".join(name for name, _ in upload_files)[:250]
             info = extracted["race"]
             st.success(f"Se extrajeron {len(extracted['horses'])} caballos. Revisa y corrige la tabla.")
+            usage = extracted.get("usage")
+            if usage:
+                st.caption(f"Tokens usados en esta lectura: {usage['input']:,} de entrada y {usage['output']:,} de salida.")
             for warning in extracted.get("warnings", []):
                 st.warning(warning)
             detected = [f"{k}: {v}" for k, v in info.items() if v]
@@ -1057,7 +1084,8 @@ edited_df = st.data_editor(
 # 04 Simulacion
 # ---------------------------------------------------------------------------
 step_header("04", "Simulación y resultados", "Monte Carlo sobre el rating ajustado de cada caballo")
-if st.button("Ejecutar simulacion Monte Carlo", type="primary"):
+def execute_simulation(intuition: dict[str, float] | None) -> None:
+    """Corre el Monte Carlo con la tabla actual y guarda el resultado en la sesion."""
     horses_list = edited_df.to_dict("records")
     try:
         results = sim.simulate_race(
@@ -1071,29 +1099,35 @@ if st.button("Ejecutar simulacion Monte Carlo", type="primary"):
             bias_speed=bias_speed,
             bias_rail=bias_rail,
             weights=weights,
+            intuition=intuition,
         )
     except ValueError as exc:
         st.error(str(exc))
-    else:
-        st.session_state["results"] = {
-            "table": results,
-            "horses": [sim.normalize_horse(h) for h in horses_list],
-            "iterations": int(iterations),
-            "sigma": float(sigma),
-            "race": {
-                "race_name": race_name or "Carrera sin nombre",
-                "race_number": int(race_number) or None,
-                "track": track,
-                "race_date": race_date.isoformat(),
-                "surface": surface,
-                "distance": distance or None,
-                "track_condition": track_condition,
-                "bias_speed": bias_speed,
-                "bias_rail": bias_rail,
-                "source_filename": st.session_state.get("source_filename"),
-            },
-        }
-        st.session_state.pop("saved_race_id", None)
+        return
+    st.session_state["results"] = {
+        "table": results,
+        "horses": [sim.normalize_horse(h) for h in horses_list],
+        "iterations": int(iterations),
+        "sigma": float(sigma),
+        "with_expert": bool(intuition),
+        "race": {
+            "race_name": race_name or "Carrera sin nombre",
+            "race_number": int(race_number) or None,
+            "track": track,
+            "race_date": race_date.isoformat(),
+            "surface": surface,
+            "distance": distance or None,
+            "track_condition": track_condition,
+            "bias_speed": bias_speed,
+            "bias_rail": bias_rail,
+            "source_filename": st.session_state.get("source_filename"),
+        },
+    }
+    st.session_state.pop("saved_race_id", None)
+
+
+if st.button("Ejecutar simulacion Monte Carlo", type="primary"):
+    execute_simulation(None)
 
 saved = st.session_state.get("results")
 if saved and "avg_finish" not in saved["table"].columns:
@@ -1122,6 +1156,67 @@ if saved:
     st.markdown(finish_order_html(analysis), unsafe_allow_html=True)
     st.markdown('<div class="sub-h">Comentario de la carrera</div>', unsafe_allow_html=True)
     st.markdown(commentary_html(analysis), unsafe_allow_html=True)
+
+    st.markdown('<div class="sub-h">Criterio experto (Claude)</div>', unsafe_allow_html=True)
+    st.caption(
+        "El modelo calcula con numeros; aqui un handicapper (Claude) lee el resultado y los datos del DRF, opina "
+        "con criterio, puede discrepar del modelo y propone un pequeno ajuste por caballo (maximo 3 puntos). "
+        "El Morning Line le sirve como señal de mercado, no para calificar. Cuesta centavos (solo texto)."
+    )
+    if not api_ok:
+        st.caption("No esta configurado (revisa ANTHROPIC_API_KEY).")
+    elif st.button("Pedir criterio experto", key="ask_expert"):
+        with st.spinner("El experto esta analizando la carrera..."):
+            try:
+                st.session_state["expert"] = ex.ask_expert(
+                    results, saved["horses"], saved["race"], results.attrs.get("pace")
+                )
+            except ex.ExpertError as exc:
+                st.error(str(exc))
+    opinion = st.session_state.get("expert")
+    if opinion:
+        names = {str(r["program_number"]): r["name"] for r in records}
+        st.markdown(
+            '<div class="cm">'
+            + "".join(
+                f"<p>{escape(text)}</p>"
+                for text in (opinion["thesis"], opinion["pace_plan"], opinion["value_note"]) if text
+            )
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+        if opinion["top4"]:
+            st.markdown(
+                "**Orden probable segun el experto:** "
+                + " · ".join(f"{i}. #{n} {names.get(n, '')}" for i, n in enumerate(opinion["top4"], start=1))
+            )
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {"#": n, "Caballo": names.get(n, ""), "Postura": info["stance"],
+                     "Ajuste (pts)": info["adjust"], "Comentario": info["comment"]}
+                    for n, info in opinion["horses"].items()
+                ]
+            ),
+            hide_index=True,
+        )
+        for caveat in opinion["caveats"]:
+            st.caption("Limite: " + caveat)
+        usage = opinion.get("usage") or {}
+        if usage:
+            st.caption(f"Tokens del experto: {usage.get('input', 0):,} de entrada y {usage.get('output', 0):,} de salida.")
+        adjustments = ex.intuition_adjustments(opinion)
+        if saved.get("with_expert"):
+            st.success("La simulacion de arriba YA incluye el criterio experto (columna Criterio experto).")
+            if st.button("Quitar el criterio y volver a simular", key="drop_expert"):
+                execute_simulation(None)
+                st.rerun()
+        elif adjustments:
+            if st.button("Aplicar el criterio experto y volver a simular", key="apply_expert", type="primary"):
+                execute_simulation(adjustments)
+                st.rerun()
+        else:
+            st.caption("El experto coincide con el modelo: no propone ajustes.")
 
     st.markdown('<div class="sub-h">Jugadas con valor esperado positivo (+EV)</div>', unsafe_allow_html=True)
     value_records = sorted(
