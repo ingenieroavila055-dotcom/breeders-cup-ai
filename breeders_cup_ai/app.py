@@ -1032,6 +1032,9 @@ if extract_clicked:
                 st.caption(f"Tokens usados en esta lectura: {usage['input']:,} de entrada y {usage['output']:,} de salida.")
             for warning in extracted.get("warnings", []):
                 st.warning(warning)
+            if extracted.get("debug"):
+                with st.expander("Ver la respuesta cruda (para diagnosticar)"):
+                    st.code(extracted["debug"], language=None)
             detected = [f"{k}: {v}" for k, v in info.items() if v]
             if detected:
                 st.caption("Datos detectados en el material (manda tu configuracion): " + " · ".join(detected))
